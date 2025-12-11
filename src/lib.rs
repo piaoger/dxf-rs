@@ -175,6 +175,8 @@ pub mod entities {
 }
 pub mod tables {
     pub use crate::generated::tables::*;
+
+    pub use crate::table::*;
 }
 pub mod objects {
     pub use crate::generated::objects::*;
@@ -200,6 +202,11 @@ pub use crate::line_weight::LineWeight;
 
 mod entity;
 pub use crate::entity::LwPolylineVertex;
+
+mod mleader_entity;
+
+mod hatch;
+pub use crate::hatch::{BoundaryPath, BoundaryPathEdge, PatternDefinitionLine};
 
 mod object;
 pub use crate::object::{GeoMeshPoint, MLineStyleElement};

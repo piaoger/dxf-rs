@@ -12,9 +12,11 @@ use crate::{
 };
 
 use crate::code_pair_put_back::CodePairPutBack;
+use crate::entities::Entity;
 use crate::enums::*;
 use crate::helper_functions::*;
 use crate::objects::*;
+use crate::Handle;
 
 //------------------------------------------------------------------------------
 //                                                                  GeoMeshPoint
@@ -74,6 +76,20 @@ impl ObjectCommon {
     /// Ensures all values are valid.
     pub fn normalize(&mut self) {
         // nothing to do, but this method should still exist.
+    }
+}
+
+//------------------------------------------------------------------------------
+//                                                                  SortensTable
+//------------------------------------------------------------------------------
+impl SortentsTable {
+    // Add multiple entities with SAME sort order
+    pub fn add_entities_same_order(&mut self, entities: &[&Entity], sort_order: u64) {
+        let sort_handle = Handle(sort_order);
+        for entity in entities {
+            self.__entities_handle.push(entity.common.handle);
+            self.__sort_items_handle.push(sort_handle);
+        }
     }
 }
 
@@ -1649,6 +1665,18 @@ impl Object {
                     pairs.push(pair.clone());
                 }
             }
+            ObjectType::SortentsTable(ref st) => {
+                pairs.push(CodePair::new_str(100, "AcDbSortentsTable"));
+                // Pair the two sort handles and entities together and write 331 then 5
+                for (entity_handle, sort_handle) in st
+                    .__entities_handle
+                    .iter()
+                    .zip(st.__sort_items_handle.iter())
+                {
+                    pairs.push(CodePair::new_string(331, &entity_handle.as_string()));
+                    pairs.push(CodePair::new_string(5, &sort_handle.as_string()));
+                }
+            }
             _ => return false, // no custom writer
         }
 
@@ -1764,7 +1792,7 @@ mod tests {
         drawing.add_object(obj);
         assert_contains_pairs(
             &drawing,
-            vec![CodePair::new_str(0, "IMAGEDEF"), CodePair::new_str(5, "10")],
+            vec![CodePair::new_str(0, "IMAGEDEF"), CodePair::new_str(5, "1E")],
         );
     }
 
@@ -1981,7 +2009,7 @@ mod tests {
             &drawing,
             vec![
                 CodePair::new_str(0, "LIGHTLIST"),
-                CodePair::new_str(5, "10"),
+                CodePair::new_str(5, "1E"),
                 CodePair::new_str(330, "A2"),
             ],
         );
@@ -2068,6 +2096,9 @@ mod tests {
             vec![
                 CodePair::new_str(0, "SECTION"),
                 CodePair::new_str(2, "OBJECTS"),
+                CodePair::new_str(0, "DICTIONARY"),
+                CodePair::new_str(5, "1D"),
+                CodePair::new_str(100, "AcDbDictionary"),
                 CodePair::new_str(0, "ENDSEC"),
             ],
         );
@@ -2079,6 +2110,11 @@ mod tests {
             vec![
                 CodePair::new_str(0, "SECTION"),
                 CodePair::new_str(2, "OBJECTS"),
+                CodePair::new_str(0, "DICTIONARY"),
+                CodePair::new_str(5, "1D"),
+                CodePair::new_str(100, "AcDbDictionary"),
+                CodePair::new_i16(280, 0),
+                CodePair::new_i16(281, 0),
                 CodePair::new_str(0, "ACAD_PROXY_OBJECT"),
             ],
         );
@@ -2229,9 +2265,9 @@ mod tests {
                     assert_eq!(a.__id_buffers_handle, b.__id_buffers_handle);
                     assert_eq!(a.id_buffer_counts, b.id_buffer_counts);
                 }
-                (&ObjectType::SpatialIndex(_), &ObjectType::SpatialIndex(_)) => {
-                    // SpatialIndex has a timestamp that will obviously differ; there are no other fields
-                }
+                // (&ObjectType::SpatialIndex(_), &ObjectType::SpatialIndex(_)) => {
+                // SpatialIndex has a timestamp that will obviously differ; there are no other fields
+                // }
                 _ => assert_eq!(expected_type, obj.specific),
             }
 

@@ -38,7 +38,8 @@ use crate::extension_data;
 use crate::x_data;
 
 use crate::enums::*;
-use enum_primitive::FromPrimitive;
+use crate::table::*;
+use crate::enum_primitive::FromPrimitive;
 ".trim_start());
     fun.push('\n');
     generate_table_items(&mut fun, &element);
@@ -228,45 +229,63 @@ fn generate_table_reader(fun: &mut String, element: &Element) {
         for field in &table_item.children {
             if generate_reader(field) {
                 for (i, &cd) in codes(field).iter().enumerate() {
-                    let reader = field_reader(field);
-                    let codes = codes(field);
-                    let write_cmd = match codes.len() {
-                        1 => {
-                            let read_fun = if allow_multiples(field) {
-                                format!(".push({reader})")
-                            } else {
-                                format!(" = {reader}")
-                            };
-                            let normalized_field_name = if field.name == "Pointer" {
-                                format!("__{}_handle", name(field))
-                            } else {
-                                name(field)
-                            };
-                            format!("item.{normalized_field_name}{read_fun}")
-                        }
-                        _ => {
-                            let suffix = match i {
-                                0 => "x",
-                                1 => "y",
-                                2 => "z",
-                                _ => panic!("impossible"),
-                            };
-                            format!(
-                                "item.{field}.{suffix} = {reader}",
-                                field = name(field),
-                                suffix = suffix,
-                                reader = reader
-                            )
-                        }
-                    };
-                    fun.push_str(&format!(
+                    if !attr(field, "CodeReaderOverride").is_empty() {
+                        let code_reader_override = attr(field, "CodeReaderOverride");
+                        fun.push_str(&format!(
+                            "                                    {code} => {reader}(pair, &mut item)?,\n",
+                            code = cd,
+                            reader = code_reader_override
+                        ));
+                    } else {
+                        let reader = field_reader(field);
+                        let codes = codes(field);
+                        let write_cmd = match codes.len() {
+                            1 => {
+                                let read_fun = if allow_multiples(field) {
+                                    format!(".push({reader})")
+                                } else {
+                                    format!(" = {reader}")
+                                };
+                                let normalized_field_name = if field.name == "Pointer" {
+                                    format!("__{}_handle", name(field))
+                                } else {
+                                    name(field)
+                                };
+                                format!("item.{normalized_field_name}{read_fun}")
+                            }
+                            _ => {
+                                let suffix = match i {
+                                    0 => "x",
+                                    1 => "y",
+                                    2 => "z",
+                                    _ => panic!("impossible"),
+                                };
+                                format!(
+                                    "item.{field}.{suffix} = {reader}",
+                                    field = name(field),
+                                    suffix = suffix,
+                                    reader = reader
+                                )
+                            }
+                        };
+                        fun.push_str(&format!(
                         "                                    {cd} => {{ {write_cmd}; }},\n"
-                    ));
+                    	));
+		    }
                 }
             }
         }
 
-        fun.push_str("                                    _ => (), // unsupported code\n");
+        if !attr(table_item, "CustomReader").is_empty() {
+            let custom_reader = attr(table_item, "CustomReader");
+            fun.push_str(&format!(
+                "                                    _ => {reader}(pair, &mut item)?, // unsupported code\n",
+                reader = custom_reader
+            ));
+        } else {
+            fun.push_str("                                    _ => (), // unsupported code\n");
+        }
+
         fun.push_str("                                }\n");
         fun.push_str("                            },\n");
         fun.push_str("                            Some(Err(e)) => return Err(e),\n");
@@ -303,6 +322,7 @@ fn generate_table_reader(fun: &mut String, element: &Element) {
 }
 
 fn generate_table_writer(fun: &mut String, element: &Element) {
+    // Panic if there are more tables than reserved handles
     fun.push_str(
         "pub(crate) fn add_table_code_pairs(drawing: &Drawing, pairs: &mut Vec<CodePair>, write_handles: bool) {\n",
     );
@@ -335,16 +355,13 @@ fn generate_table_writer(fun: &mut String, element: &Element) {
     fun.push_str("}\n");
     fun.push('\n');
 
+    let mut table_i = 1;
     for table in &element.children {
+        table_i += 1;
         let table_item = &table.children[0];
         fun.push_str("#[allow(clippy::cognitive_complexity)] // long function, no good way to simplify this\n");
         fun.push_str(&format!("fn add_{collection}_code_pairs(pairs: &mut Vec<CodePair>, drawing: &Drawing, write_handles: bool) {{\n", collection=attr(table, "Collection")));
-        fun.push_str(&format!(
-            "    if !drawing.{collection}().any(|_| true) {{ // is empty\n",
-            collection = attr(table, "Collection")
-        ));
-        fun.push_str("        return; // nothing to add\n");
-        fun.push_str("    }\n");
+
         fun.push('\n');
         fun.push_str("    pairs.push(CodePair::new_str(0, \"TABLE\"));\n");
         fun.push_str(&format!(
@@ -353,15 +370,27 @@ fn generate_table_writer(fun: &mut String, element: &Element) {
         ));
 
         // TODO: assign and write table handles
-        // fun.push_str("    if write_handles {\n");
-        // fun.push_str("        pairs.push(CodePair::new_str(5, \"0\"));\n");
-        // fun.push_str("    }\n");
-        // fun.push_str("\n");
+        fun.push_str("    if write_handles {\n");
+        fun.push_str(&format!(
+            "        pairs.push(CodePair::new_str(5, \"{handle}\"));\n",
+            handle = format!("{:X}", table_i),
+        ));
+        fun.push_str("    }\n");
+        fun.push_str("\n");
 
         let item_type = name(table_item);
 
         fun.push_str("    pairs.push(CodePair::new_str(100, \"AcDbSymbolTable\"));\n");
         fun.push_str("    pairs.push(CodePair::new_i16(70, 0));\n");
+
+        let table_class_name = attr(table, "TableClassName");
+        if !table_class_name.is_empty() {
+            fun.push_str(&format!(
+                "    pairs.push(CodePair::new_str(100, \"{}\"));\n",
+                table_class_name
+            ));
+        }
+
         fun.push_str(&format!(
             "    for item in drawing.{collection}() {{\n",
             collection = attr(table, "Collection")
@@ -371,7 +400,29 @@ fn generate_table_writer(fun: &mut String, element: &Element) {
             type_string = attr(table, "TypeString")
         ));
         fun.push_str("        if write_handles {\n");
-        fun.push_str(&format!("            pairs.push(CodePair::new_string(5, &DrawingItem::{item_type}(item).handle().as_string()));\n"));
+
+        // If the table is DIMSTYLE the group handle code 5 should be 105
+        if attr(table, "TypeString").eq("DIMSTYLE") {
+            fun.push_str("            if drawing.header.version >= AcadVersion::R2018 {\n");
+            fun.push_str(&format!("                pairs.push(CodePair::new_string(105, &DrawingItem::{item_type}(item).handle().as_string()));\n",
+            item_type=item_type));
+            fun.push_str("            } else {\n");
+            fun.push_str(&format!("                pairs.push(CodePair::new_string(5, &DrawingItem::{item_type}(item).handle().as_string()));\n",
+            item_type=item_type));
+            fun.push_str("            }\n");
+        } else {
+            fun.push_str(&format!("            pairs.push(CodePair::new_string(5, &DrawingItem::{item_type}(item).handle().as_string()));\n",
+            item_type=item_type));
+        }
+
+        // Add parent group code 330 if version is above AcadVersion::R2018 use the table_i handle
+        fun.push_str("            if drawing.header.version >= AcadVersion::R2018 {\n");
+        fun.push_str(&format!(
+            "                pairs.push(CodePair::new_string(330, \"{parent}\"));\n",
+            parent = format!("{:X}", table_i),
+        ));
+        fun.push_str("            }");
+
         fun.push_str("        }\n");
         fun.push('\n');
         fun.push_str("        if drawing.header.version >= AcadVersion::R14 {\n");
@@ -387,102 +438,17 @@ fn generate_table_writer(fun: &mut String, element: &Element) {
         ));
         fun.push_str("        pairs.push(CodePair::new_string(2, &item.name));\n");
         fun.push_str("        pairs.push(CodePair::new_i16(70, 0));\n"); // TODO: flags
-        for field in &table_item.children {
-            if generate_writer(field) {
-                let mut predicates = vec![];
-                if !min_version(field).is_empty() {
-                    predicates.push(format!(
-                        "drawing.header.version >= AcadVersion::{}",
-                        min_version(field)
-                    ));
-                }
-                if !max_version(field).is_empty() {
-                    predicates.push(format!(
-                        "drawing.header.version <= AcadVersion::{}",
-                        max_version(field)
-                    ));
-                }
-                if !write_condition(field).is_empty() {
-                    predicates.push(write_condition(field));
-                }
-                if disable_writing_default(field) {
-                    predicates.push(format!(
-                        "item.{field} != {default_value}",
-                        field = name(field),
-                        default_value = default_value(field)
-                    ));
-                }
-                let indent = if predicates.is_empty() { "" } else { "    " };
-                if !predicates.is_empty() {
-                    fun.push_str(&format!(
-                        "        if {predicate} {{\n",
-                        predicate = predicates.join(" && ")
-                    ));
-                }
 
-                if allow_multiples(field) {
-                    let code = code(field);
-                    if field.name == "Pointer" {
-                        fun.push_str(&format!(
-                            "{indent}        for x in &item.__{field}_handle {{\n",
-                            indent = indent,
-                            field = name(field)
-                        ));
-                        fun.push_str(&format!("{indent}            pairs.push(CodePair::new_string({code}, &x.as_string()));\n"));
-                    } else {
-                        let expected_type = ExpectedType::new(code).unwrap();
-                        let typ = code_pair_type(&expected_type);
-                        let val = match expected_type {
-                            ExpectedType::Str => "x",
-                            ExpectedType::Binary => "x.clone()",
-                            _ => "*x",
-                        };
-                        fun.push_str(&format!(
-                            "{indent}        for x in &item.{field} {{\n",
-                            indent = indent,
-                            field = name(field)
-                        ));
-                        fun.push_str(&format!(
-                            "{indent}            pairs.push(CodePair::new_{typ}({code}, {val}));\n"
-                        ));
-                    }
-                    fun.push_str(&format!("{indent}        }}\n"));
-                } else {
-                    let codes = codes(field);
-                    if codes.len() == 1 {
-                        let code = codes[0];
-                        if field.name == "Pointer" {
-                            fun.push_str(&format!("{indent}        pairs.push(CodePair::new_string({code}, &item.__{field}_handle.as_string()));\n",
-                                indent=indent, code=code, field=name(field)));
-                        } else {
-                            let typ = ExpectedType::new(code).unwrap();
-                            let typ = code_pair_type(&typ);
-                            let value = format!("item.{}", name(field));
-                            let write_converter = if attr(field, "WriteConverter").is_empty() {
-                                String::from("{}")
-                            } else {
-                                attr(field, "WriteConverter")
-                            };
-                            let value = write_converter.replace("{}", &value);
-                            fun.push_str(&format!("{indent}        pairs.push(CodePair::new_{typ}({code}, {value}));\n"));
-                        }
-                    } else {
-                        for (i, code) in codes.iter().enumerate() {
-                            let suffix = match i {
-                                0 => "x",
-                                1 => "y",
-                                2 => "z",
-                                _ => panic!("impossible"),
-                            };
-                            fun.push_str(&format!("{indent}        pairs.push(CodePair::new_f64({code}, item.{field}.{suffix}));\n",
-                                indent=indent, code=code, field=name(field), suffix=suffix));
-                        }
-                    }
-                }
-
-                if !predicates.is_empty() {
-                    fun.push_str("        }\n");
-                }
+        // Check if there is a custom table writer
+        if !attr(table_item, "CustomWriter").is_empty() {
+            let custom_writer = attr(table_item, "CustomWriter");
+            fun.push_str(&format!(
+                "        {}(item, pairs, drawing);\n",
+                custom_writer
+            ));
+        } else {
+            for field in &table_item.children {
+                generate_table_field_writer(field, fun);
             }
         }
 
@@ -495,6 +461,105 @@ fn generate_table_writer(fun: &mut String, element: &Element) {
         fun.push_str("    pairs.push(CodePair::new_str(0, \"ENDTAB\"));\n");
         fun.push_str("}\n");
         fun.push('\n');
+    }
+}
+
+fn generate_table_field_writer(field: &Element, fun: &mut String) {
+    if generate_writer(field) {
+        let mut predicates = vec![];
+        if !min_version(field).is_empty() {
+            predicates.push(format!(
+                "drawing.header.version >= AcadVersion::{}",
+                min_version(field)
+            ));
+        }
+        if !max_version(field).is_empty() {
+            predicates.push(format!(
+                "drawing.header.version <= AcadVersion::{}",
+                max_version(field)
+            ));
+        }
+        if !write_condition(field).is_empty() {
+            predicates.push(write_condition(field));
+        }
+        if disable_writing_default(field) {
+            predicates.push(format!(
+                "item.{field} != {default_value}",
+                field = name(field),
+                default_value = default_value(field)
+            ));
+        }
+        let indent = if predicates.is_empty() { "" } else { "    " };
+        if !predicates.is_empty() {
+            fun.push_str(&format!(
+                "        if {predicate} {{\n",
+                predicate = predicates.join(" && ")
+            ));
+        }
+
+        if allow_multiples(field) {
+            let code = code(field);
+            if field.name == "Pointer" {
+                fun.push_str(&format!(
+                    "{indent}        for x in &item.__{field}_handle {{\n",
+                    indent = indent,
+                    field = name(field)
+                ));
+                        fun.push_str(&format!("{indent}            pairs.push(CodePair::new_string({code}, &x.as_string()));\n"));
+            } else {
+                let expected_type = ExpectedType::new(code).unwrap();
+                let typ = code_pair_type(&expected_type);
+                let val = match expected_type {
+                    ExpectedType::Str => "x",
+                    ExpectedType::Binary => "x.clone()",
+                    _ => "*x",
+                };
+                fun.push_str(&format!(
+                    "{indent}        for x in &item.{field} {{\n",
+                    indent = indent,
+                    field = name(field)
+                ));
+                fun.push_str(&format!(
+                            "{indent}            pairs.push(CodePair::new_{typ}({code}, {val}));\n"
+                        ));
+            }
+            fun.push_str(&format!("{indent}        }}\n"));
+        } else {
+            let codes = codes(field);
+            if codes.len() == 1 {
+                let code = codes[0];
+                if field.name == "Pointer" {
+                    fun.push_str(&format!("{indent}        pairs.push(CodePair::new_string({code}, &item.__{field}_handle.as_string()));\n",
+                        indent=indent, code=code, field=name(field)));
+                } else {
+                    let typ = ExpectedType::new(code).unwrap();
+                    let typ = code_pair_type(&typ);
+                    let value = format!("item.{}", name(field));
+                    let write_converter = if attr(field, "WriteConverter").is_empty() {
+                        String::from("{}")
+                    } else {
+                        attr(field, "WriteConverter")
+                    };
+                            let value = write_converter.replace("{}", &value);
+                            fun.push_str(&format!("{indent}        pairs.push(CodePair::new_{typ}({code}, {value}));\n"));
+                        }
+            } else {
+                for (i, code) in codes.iter().enumerate() {
+                    let suffix = match i {
+                        0 => "x",
+                        1 => "y",
+                        2 => "z",
+                        _ => panic!("impossible"),
+                    };
+                    fun.push_str(&format!("{indent}        pairs.push(CodePair::new_f64({code}, item.{field}.{suffix}));\n",
+                        indent=indent, code=code, field=name(field), suffix=suffix));
+                }
+            }
+        }
+
+        if !predicates.is_empty() {
+            fun.push_str("        }\n");
+        }
     }
 }
 

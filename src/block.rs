@@ -17,6 +17,8 @@ use crate::x_data;
 pub struct Block {
     /// The block's handle.
     pub handle: Handle,
+    // The ENDBLK handle - for newer versions of DXF https://ezdxf.readthedocs.io/en/stable/dxfinternals/block_management.html.
+    pub end_blk_handle: Handle,
     #[doc(hidden)]
     pub __owner_handle: Handle,
     /// The name of the layer containing the block.
@@ -101,6 +103,7 @@ impl Default for Block {
     fn default() -> Self {
         Block {
             handle: Handle::empty(),
+            end_blk_handle: Handle::empty(),
             __owner_handle: Handle::empty(),
             layer: String::from("0"),
             name: String::new(),
@@ -252,8 +255,8 @@ impl Block {
         }
 
         pairs.push(CodePair::new_str(0, "ENDBLK"));
-        if write_handles && !self.handle.is_empty() {
-            pairs.push(CodePair::new_string(5, &self.handle.as_string()));
+        if write_handles && !self.end_blk_handle.is_empty() {
+            pairs.push(CodePair::new_string(5, &self.end_blk_handle.as_string()));
         }
 
         if version >= AcadVersion::R14 {
@@ -694,14 +697,14 @@ mod tests {
         let reparsed = drawing_from_pairs(drawing_pairs);
 
         let blocks = reparsed.blocks().collect::<Vec<_>>();
-        assert_eq!(2, blocks.len());
-        assert_eq!(1, blocks[0].entities.len());
-        match blocks[0].entities[0].specific {
+        assert_eq!(4, blocks.len());
+        assert_eq!(1, blocks[2].entities.len());
+        match blocks[2].entities[0].specific {
             EntityType::Line(_) => (),
             _ => panic!("expected a line"),
         }
-        assert_eq!(1, blocks[1].entities.len());
-        match blocks[1].entities[0].specific {
+        assert_eq!(1, blocks[3].entities.len());
+        match blocks[3].entities[0].specific {
             EntityType::Circle(_) => (),
             _ => panic!("expected a circle"),
         }
@@ -731,7 +734,34 @@ mod tests {
                 CodePair::new_str(2, "BLOCKS"),
                 CodePair::new_str(0, "BLOCK"),
                 // no handle
-                CodePair::new_str(8, "0"),          // layer
+                // Default blocks model space
+                CodePair::new_str(8, "0"),            // layer
+                CodePair::new_str(2, "*MODEL_SPACE"), // name
+                CodePair::new_i16(70, 0),             // flags
+                CodePair::new_f64(10, 0.0),           // insertion point
+                CodePair::new_f64(20, 0.0),
+                CodePair::new_f64(30, 0.0),
+                CodePair::new_str(3, "*MODEL_SPACE"),
+                CodePair::new_str(1, ""), // x-ref name; empty = external
+                CodePair::new_str(0, "ENDBLK"),
+                CodePair::new_str(5, "F"), // entity handle
+                CodePair::new_str(8, "0"),
+                // Default paper space block
+                CodePair::new_str(0, "BLOCK"),
+                CodePair::new_str(8, "0"),
+                CodePair::new_str(2, "*PAPER_SPACE"), // name
+                CodePair::new_i16(70, 0),             // flags
+                CodePair::new_f64(10, 0.0),           // insertion point
+                CodePair::new_f64(20, 0.0),
+                CodePair::new_f64(30, 0.0),
+                CodePair::new_str(3, "*PAPER_SPACE"),
+                CodePair::new_str(1, ""), // x-ref name; empty = external
+                CodePair::new_str(0, "ENDBLK"),
+                CodePair::new_str(5, "14"), // entity handle
+                CodePair::new_str(8, "0"),
+                // Added block
+                CodePair::new_str(0, "BLOCK"),
+                CodePair::new_str(8, "0"),
                 CodePair::new_str(2, "block-name"), // name
                 CodePair::new_i16(70, 0),           // flags
                 CodePair::new_f64(10, 0.0),         // insertion point
@@ -740,14 +770,14 @@ mod tests {
                 CodePair::new_str(3, "block-name"), // name again
                 CodePair::new_str(1, ""),           // x-ref name; empty = external
                 CodePair::new_str(0, "LINE"),       // first entity
-                CodePair::new_str(5, "12"),         // entity handle
+                CodePair::new_str(5, "21"),         // entity handle
             ],
         );
         assert_contains_pairs(
             &drawing,
             vec![
                 CodePair::new_str(0, "ENDBLK"),
-                CodePair::new_str(5, "10"), // endblk got handle, original block didn't
+                CodePair::new_str(5, "1F"), // endblk got handle, original block didn't
                 CodePair::new_str(8, "0"),  // layer
                 CodePair::new_str(0, "ENDSEC"), // end of block
             ],

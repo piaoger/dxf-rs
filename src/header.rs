@@ -95,7 +95,7 @@ mod tests {
             "HEADER",
             vec![
                 CodePair::new_str(9, "$ACADMAINTVER"),
-                CodePair::new_i16(70, 16),
+                CodePair::new_i32(90, 16),
                 CodePair::new_str(9, "$ACADVER"),
                 CodePair::new_str(1, "AC1012"),
                 CodePair::new_str(9, "$ANGBASE"),
@@ -159,7 +159,28 @@ mod tests {
             &drawing,
             vec![
                 CodePair::new_str(9, "$ACADMAINTVER"),
+                CodePair::new_i16(90, 4242),
+            ],
+        );
+    }
+
+    #[test]
+    fn maintenance_version_is_only_written_with_code_90_r2018() {
+        let mut drawing = Drawing::new();
+        drawing.header.version = AcadVersion::R2018; // $ACADMAINTVER is only written for R14 and later
+        drawing.header.maintenance_version = 4242;
+        assert_contains_pairs(
+            &drawing,
+            vec![
+                CodePair::new_str(9, "$ACADMAINTVER"),
                 CodePair::new_i32(90, 4242),
+            ],
+        );
+        assert_not_contains_pairs(
+            &drawing,
+            vec![
+                CodePair::new_str(9, "$ACADMAINTVER"),
+                CodePair::new_i16(70, 4242),
             ],
         );
     }
@@ -358,7 +379,7 @@ mod tests {
             &drawing,
             vec![
                 CodePair::new_str(9, "$HANDSEED"),
-                CodePair::new_str(5, "11"),
+                CodePair::new_str(5, "1F"),
             ],
         );
     }
@@ -369,7 +390,7 @@ mod tests {
             "HEADER",
             vec![
                 CodePair::new_str(9, "$HANDSEED"),
-                CodePair::new_str(5, "11"),
+                CodePair::new_str(5, "18"),
             ],
         );
         drawing.add_entity(Entity::new(EntityType::Line(Line::new(
@@ -380,7 +401,7 @@ mod tests {
             &drawing,
             vec![
                 CodePair::new_str(9, "$HANDSEED"),
-                CodePair::new_str(5, "15"),
+                CodePair::new_str(5, "1C"),
             ],
         );
     }

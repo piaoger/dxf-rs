@@ -2,7 +2,10 @@
 
 use enum_primitive::FromPrimitive;
 
-use crate::{CodePair, Color, DxfError, DxfResult, Handle, Point, Vector};
+use crate::enums::HatchStyle;
+use crate::{
+    BoundaryPath, BoundaryPathEdge, CodePair, Color, DxfError, DxfResult, Handle, Point, Vector,
+};
 
 use crate::code_pair_put_back::CodePairPutBack;
 use crate::entities::*;
@@ -126,6 +129,56 @@ pub struct LwPolylineVertex {
     pub starting_width: f64,
     pub ending_width: f64,
     pub bulge: f64,
+}
+
+//------------------------------------------------------------------------------
+//                                                                       MLeader
+//------------------------------------------------------------------------------
+
+impl MLeader {
+    pub fn get_vertices(&self) -> Vec<Point> {
+        if self.vertices.is_empty() {
+            // If there are no vertices, return an empty vector
+            return vec![];
+        }
+
+        let mut vertices = self.vertices.clone();
+
+        // Add the last leader point if it has been set
+        if self.has_set_last_leader_line_point {
+            vertices.insert(0, self.last_leader_line_point.clone());
+        }
+
+        if self.enable_dogleg {
+            // Insert before the first coordinate the dogleg coordinate
+            let dogleg_vertice = match self.calculate_dogleg_vertice() {
+                Some(dogleg) => dogleg,
+                None => return vec![], // If no dogleg can be calculated, return empty
+            };
+            vertices.insert(0, dogleg_vertice);
+        }
+
+        vertices
+    }
+
+    fn calculate_dogleg_vertice(&self) -> Option<Point> {
+        // Calculate from the first coordinate of the vertices
+        let first_vertex = if self.has_set_last_leader_line_point {
+            &self.last_leader_line_point
+        } else {
+            match self.vertices.first() {
+                Some(first_vertex) => first_vertex,
+                None => return None, // No vertices available
+            }
+        };
+
+        // Calculate the new vertex with cos and sin of the 3D coordinate
+        Some(Point {
+            x: first_vertex.x + self.dogleg_vector.x * self.dogleg_length,
+            y: first_vertex.y + self.dogleg_vector.y * self.dogleg_length,
+            z: first_vertex.z + self.dogleg_vector.z * self.dogleg_length,
+        })
+    }
 }
 
 //------------------------------------------------------------------------------
@@ -799,6 +852,12 @@ impl Entity {
             EntityType::MText(ref mut mtext) => {
                 Entity::apply_custom_reader_mtext(&mut self.common, mtext, iter)
             }
+            EntityType::MLeader(ref mut mleader) => {
+                Entity::apply_custom_reader_mleader(&mut self.common, mleader, iter)
+            }
+            EntityType::Hatch(ref mut hatch) => {
+                Entity::apply_custom_reader_hatch(&mut self.common, hatch, iter)
+            }
             _ => Ok(false), // no custom reader
         }
     }
@@ -1162,132 +1221,624 @@ impl Entity {
     ) -> DxfResult<bool> {
         let mut reading_column_data = false;
         let mut read_column_count = false;
+        let mut reading_embedded_object = false;
+        loop {
+            let pair = next_pair!(iter);
+            // The embedded object logic has been deducted from https://github.com/mozman/ezdxf/blob/master/src/ezdxf/entities/mtext.py. It does not seem documented great in DXF spec.
+            if pair.code == 101 {
+                reading_embedded_object = true;
+                continue;
+            }
+
+            if reading_embedded_object {
+                match pair.code {
+                    10 => {
+                        if mtext.x_axis_direction.x == 0.0 {
+                            mtext.x_axis_direction.x = pair.assert_f64()?;
+                        }
+                    }
+                    20 => {
+                        if mtext.x_axis_direction.y == 0.0 {
+                            mtext.x_axis_direction.y = pair.assert_f64()?;
+                        }
+                    }
+                    30 => {
+                        if mtext.x_axis_direction.z == 0.0 {
+                            mtext.x_axis_direction.z = pair.assert_f64()?;
+                        }
+                    }
+                    11 => {
+                        if mtext.insertion_point.x == 0.0 {
+                            mtext.insertion_point.x = pair.assert_f64()?;
+                        }
+                    }
+                    21 => {
+                        if mtext.insertion_point.y == 0.0 {
+                            mtext.insertion_point.y = pair.assert_f64()?;
+                        }
+                    }
+                    31 => {
+                        if mtext.insertion_point.z == 0.0 {
+                            mtext.insertion_point.z = pair.assert_f64()?;
+                        }
+                    }
+                    40 => {
+                        if mtext.reference_rectangle_width == 0.0 {
+                            mtext.reference_rectangle_width = pair.assert_f64()?;
+                        }
+                    }
+                    41 => {
+                        if mtext.initial_text_height == 0.0 {
+                            mtext.initial_text_height = pair.assert_f64()?;
+                        }
+                    }
+                    42 => {
+                        mtext.horizontal_width = pair.assert_f64()?;
+                    }
+                    43 => {
+                        mtext.vertical_height = pair.assert_f64()?;
+                    }
+                    44 => {
+                        mtext.reference_rectangle_width = pair.assert_f64()?;
+                    }
+                    45 => {
+                        mtext.column_gutter = pair.assert_f64()?;
+                    }
+                    46 => {
+                        // Not implemented
+                    }
+                    71 => {
+                        mtext.column_type = pair.assert_i16()?;
+                    }
+                    72 => {
+                        mtext.column_count = pair.assert_i16()? as i32;
+                    }
+                    73 => {
+                        mtext.is_column_auto_height = as_bool(pair.assert_i16()?);
+                    }
+                    74 => {
+                        mtext.is_column_flow_reversed = as_bool(pair.assert_i16()?);
+                    }
+                    _ => {
+                        common.apply_individual_pair(&pair, iter)?;
+                    }
+                }
+            } else {
+                match pair.code {
+                    10 => {
+                        mtext.insertion_point.x = pair.assert_f64()?;
+                    }
+                    20 => {
+                        mtext.insertion_point.y = pair.assert_f64()?;
+                    }
+                    30 => {
+                        mtext.insertion_point.z = pair.assert_f64()?;
+                    }
+                    40 => {
+                        mtext.initial_text_height = pair.assert_f64()?;
+                    }
+                    41 => {
+                        mtext.reference_rectangle_width = pair.assert_f64()?;
+                    }
+                    71 => {
+                        if !reading_column_data {
+                            mtext.attachment_point = enum_from_number!(
+                                AttachmentPoint,
+                                TopLeft,
+                                from_i16,
+                                pair.assert_i16()?
+                            );
+                        }
+                    }
+                    72 => {
+                        if !reading_column_data {
+                            mtext.drawing_direction = enum_from_number!(
+                                DrawingDirection,
+                                LeftToRight,
+                                from_i16,
+                                pair.assert_i16()?
+                            );
+                        }
+                    }
+                    3 => {
+                        mtext.extended_text.push(pair.assert_string()?);
+                    }
+                    1 => {
+                        mtext.text = pair.assert_string()?;
+                    }
+                    7 => {
+                        mtext.text_style_name = pair.assert_string()?;
+                    }
+                    210 => {
+                        mtext.extrusion_direction.x = pair.assert_f64()?;
+                    }
+                    220 => {
+                        mtext.extrusion_direction.y = pair.assert_f64()?;
+                    }
+                    230 => {
+                        mtext.extrusion_direction.z = pair.assert_f64()?;
+                    }
+                    11 => {
+                        mtext.x_axis_direction.x = pair.assert_f64()?;
+                    }
+                    21 => {
+                        mtext.x_axis_direction.y = pair.assert_f64()?;
+                    }
+                    31 => {
+                        mtext.x_axis_direction.z = pair.assert_f64()?;
+                    }
+                    42 => {
+                        mtext.horizontal_width = pair.assert_f64()?;
+                    }
+                    43 => {
+                        mtext.vertical_height = pair.assert_f64()?;
+                    }
+                    50 => {
+                        if reading_column_data {
+                            if read_column_count {
+                                mtext.column_heights.push(pair.assert_f64()?);
+                            } else {
+                                mtext.column_count = pair.assert_f64()? as i32;
+                                read_column_count = true;
+                            }
+                        } else {
+                            mtext.rotation_angle = pair.assert_f64()?;
+                        }
+                    }
+                    73 => {
+                        mtext.line_spacing_style = enum_from_number!(
+                            MTextLineSpacingStyle,
+                            AtLeast,
+                            from_i16,
+                            pair.assert_i16()?
+                        );
+                    }
+                    44 => {
+                        if !reading_column_data {
+                            mtext.line_spacing_factor = pair.assert_f64()?;
+                        }
+                    }
+                    90 => {
+                        mtext.background_fill_setting = enum_from_number!(
+                            BackgroundFillSetting,
+                            Off,
+                            from_i32,
+                            pair.assert_i32()?
+                        );
+                    }
+                    420 => {
+                        mtext.background_color_rgb = pair.assert_i32()?;
+                    }
+                    430 => {
+                        mtext.background_color_name = pair.assert_string()?;
+                    }
+                    45 => {
+                        mtext.fill_box_scale = pair.assert_f64()?;
+                    }
+                    63 => {
+                        mtext.background_fill_color = Color::from_raw_value(pair.assert_i16()?);
+                    }
+                    441 => {
+                        mtext.background_fill_color_transparency = pair.assert_i32()?;
+                    }
+                    75 => {
+                        mtext.column_type = pair.assert_i16()?;
+                        reading_column_data = true;
+                    }
+                    76 => {
+                        mtext.column_count = i32::from(pair.assert_i16()?);
+                    }
+                    78 => {
+                        mtext.is_column_flow_reversed = as_bool(pair.assert_i16()?);
+                    }
+                    79 => {
+                        mtext.is_column_auto_height = as_bool(pair.assert_i16()?);
+                    }
+                    48 => {
+                        mtext.column_width = pair.assert_f64()?;
+                    }
+                    49 => {
+                        mtext.column_gutter = pair.assert_f64()?;
+                    }
+                    _ => {
+                        common.apply_individual_pair(&pair, iter)?;
+                    }
+                }
+            }
+        }
+    }
+    fn apply_custom_reader_mleader(
+        common: &mut EntityCommon,
+        mleader: &mut MLeader,
+        iter: &mut CodePairPutBack,
+    ) -> DxfResult<bool> {
+        #[derive(PartialEq)]
+        enum ReadingState {
+            TopLevel,
+            ContextData,
+            Leader,
+            LeaderLine,
+        }
+
+        let mut reading_state = ReadingState::TopLevel;
+
+        const CONTEXT_DATA_START: i32 = 300;
+        const CONTEXT_DATA_END: i32 = 301;
+        const LEADER_START: i32 = 302;
+        const LEADER_END: i32 = 303;
+        const LEADER_LINE_START: i32 = 304;
+        const LEADER_LINE_END: i32 = 305;
+
+        loop {
+            let pair = next_pair!(iter);
+
+            // Check for state changes first
+            // The state changes are based on embedded states where context_data includes leader and leader includes leader_line data.
+            match pair.code {
+                CONTEXT_DATA_START => {
+                    reading_state = ReadingState::ContextData;
+                    continue;
+                }
+                CONTEXT_DATA_END if reading_state == ReadingState::ContextData => {
+                    reading_state = ReadingState::TopLevel;
+                    continue;
+                }
+                LEADER_START if reading_state == ReadingState::ContextData => {
+                    reading_state = ReadingState::Leader;
+                    continue;
+                }
+                LEADER_END if reading_state == ReadingState::Leader => {
+                    reading_state = ReadingState::ContextData;
+                    continue;
+                }
+                LEADER_LINE_START if reading_state == ReadingState::Leader => {
+                    reading_state = ReadingState::LeaderLine;
+                    continue;
+                }
+                LEADER_LINE_END if reading_state == ReadingState::LeaderLine => {
+                    reading_state = ReadingState::Leader;
+                    continue;
+                }
+                _ => {}
+            }
+
+            // Process data based on current state
+            match reading_state {
+                ReadingState::TopLevel => match pair.code {
+                    290 => {
+                        mleader.enable_landing = as_bool(pair.assert_i16()?);
+                    }
+                    291 => {
+                        mleader.enable_dogleg = as_bool(pair.assert_i16()?);
+                    }
+                    172 => {
+                        mleader.content_type = enum_from_number!(
+                            MLeaderContentType,
+                            None,
+                            from_i16,
+                            pair.assert_i16()?
+                        )
+                    }
+                    _ => {
+                        common.apply_individual_pair(&pair, iter)?;
+                    }
+                },
+                ReadingState::ContextData => match pair.code {
+                    304 => {
+                        mleader.default_text_contents = pair.assert_string()?;
+                    }
+                    10 => {
+                        // Loop through the next two to get code 20 and 30 break and error out if those are not found
+                        let x_coord = pair.assert_f64()?;
+                        // Next iter
+                        let pair = next_pair!(iter);
+                        if pair.code != 20 {
+                            return Err(DxfError::UnexpectedCodePair(pair, String::new()));
+                        }
+                        let y_coord = pair.assert_f64()?;
+                        // Next iter
+                        let pair = next_pair!(iter);
+                        if pair.code != 30 {
+                            return Err(DxfError::UnexpectedCodePair(pair, String::new()));
+                        }
+                        let z_coord = pair.assert_f64()?;
+                        mleader.content_base_point = Point {
+                            x: x_coord,
+                            y: y_coord,
+                            z: z_coord,
+                        };
+                    }
+                    11 => {
+                        // Text normal direction (11,21,31)
+                        let x_coord = pair.assert_f64()?;
+                        let pair = next_pair!(iter);
+                        if pair.code != 21 {
+                            return Err(DxfError::UnexpectedCodePair(pair, String::new()));
+                        }
+                        let y_coord = pair.assert_f64()?;
+                        let pair = next_pair!(iter);
+                        if pair.code != 31 {
+                            return Err(DxfError::UnexpectedCodePair(pair, String::new()));
+                        }
+                        let z_coord = pair.assert_f64()?;
+                        mleader.text_normal_direction = Vector {
+                            x: x_coord,
+                            y: y_coord,
+                            z: z_coord,
+                        };
+                    }
+                    12 => {
+                        // Text location (12,22,32)
+                        let x_coord = pair.assert_f64()?;
+                        let pair = next_pair!(iter);
+                        if pair.code != 22 {
+                            return Err(DxfError::UnexpectedCodePair(pair, String::new()));
+                        }
+                        let y_coord = pair.assert_f64()?;
+                        let pair = next_pair!(iter);
+                        if pair.code != 32 {
+                            return Err(DxfError::UnexpectedCodePair(pair, String::new()));
+                        }
+                        let z_coord = pair.assert_f64()?;
+                        mleader.text_location = Point {
+                            x: x_coord,
+                            y: y_coord,
+                            z: z_coord,
+                        };
+                    }
+                    41 => {
+                        mleader.text_height = pair.assert_f64()?;
+                    }
+                    42 => {
+                        mleader.text_rotation = pair.assert_f64()?;
+                    }
+                    43 => {
+                        mleader.text_width = pair.assert_f64()?;
+                    }
+                    171 => {
+                        mleader.text_attachment = pair.assert_i16()?;
+                    }
+                    _ => common.apply_individual_pair(&pair, iter)?,
+                },
+                ReadingState::Leader => {
+                    match pair.code {
+                        10 => {
+                            // Loop through the next two to get code 20 and 30 break and error out if those are not found
+                            let x_coord = pair.assert_f64()?;
+                            // Next iter
+                            let pair = next_pair!(iter);
+                            if pair.code != 20 {
+                                return Err(DxfError::UnexpectedCodePair(pair, String::new()));
+                            }
+                            let y_coord = pair.assert_f64()?;
+                            // Next iter
+                            let pair = next_pair!(iter);
+                            if pair.code != 30 {
+                                return Err(DxfError::UnexpectedCodePair(pair, String::new()));
+                            }
+                            let z_coord = pair.assert_f64()?;
+                            mleader.last_leader_line_point = Point {
+                                x: x_coord,
+                                y: y_coord,
+                                z: z_coord,
+                            };
+                        }
+                        290 => {
+                            mleader.has_set_last_leader_line_point = as_bool(pair.assert_i16()?);
+                        }
+                        40 => {
+                            mleader.dogleg_length = pair.assert_f64()?;
+                        }
+                        11 => {
+                            mleader.dogleg_vector.x = pair.assert_f64()?;
+                        }
+                        21 => {
+                            mleader.dogleg_vector.y = pair.assert_f64()?;
+                        }
+                        31 => {
+                            mleader.dogleg_vector.z = pair.assert_f64()?;
+                        }
+                        _ => {
+                            common.apply_individual_pair(&pair, iter)?;
+                        }
+                    }
+                }
+                ReadingState::LeaderLine => {
+                    match pair.code {
+                        10 => {
+                            // Loop through the next two to get code 20 and 30 break and error out if those are not found
+                            let x_coord = pair.assert_f64()?;
+                            // Next iter
+                            let pair = next_pair!(iter);
+                            if pair.code != 20 {
+                                return Err(DxfError::UnexpectedCodePair(pair, String::new()));
+                            }
+                            let y_coord = pair.assert_f64()?;
+                            // Next iter
+                            let pair = next_pair!(iter);
+                            if pair.code != 30 {
+                                return Err(DxfError::UnexpectedCodePair(pair, String::new()));
+                            }
+                            let z_coord = pair.assert_f64()?;
+                            mleader.vertices.push(Point {
+                                x: x_coord,
+                                y: y_coord,
+                                z: z_coord,
+                            });
+                        }
+                        _ => {
+                            common.apply_individual_pair(&pair, iter)?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fn apply_custom_reader_hatch(
+        common: &mut EntityCommon,
+        hatch: &mut Hatch,
+        iter: &mut CodePairPutBack,
+    ) -> DxfResult<bool> {
+        let mut current_pattern_line = None;
+        let mut current_boundary_path: Option<BoundaryPath> = None;
+        let mut current_vertex = Point::default();
+
         loop {
             let pair = next_pair!(iter);
             match pair.code {
-                10 => {
-                    mtext.insertion_point.x = pair.assert_f64()?;
+                // Boundary path starts
+                92 => {
+                    // Save previous boundary path if exists
+                    if let Some(path) = current_boundary_path.take() {
+                        hatch.boundary_paths.push(path);
+                    }
+
+                    let boundary_type_flags = pair.assert_i32()?;
+                    current_boundary_path = Some(BoundaryPath {
+                        boundary_type_flags,
+                        ..Default::default()
+                    });
                 }
-                20 => {
-                    mtext.insertion_point.y = pair.assert_f64()?;
-                }
-                30 => {
-                    mtext.insertion_point.z = pair.assert_f64()?;
-                }
-                40 => {
-                    mtext.initial_text_height = pair.assert_f64()?;
-                }
-                41 => {
-                    mtext.reference_rectangle_width = pair.assert_f64()?;
-                }
-                71 => {
-                    mtext.attachment_point =
-                        enum_from_number!(AttachmentPoint, TopLeft, from_i16, pair.assert_i16()?);
-                }
+
+                // Polyline boundary data (only if bit 2 is set in boundary_type_flags)
                 72 => {
-                    mtext.drawing_direction = enum_from_number!(
-                        DrawingDirection,
-                        LeftToRight,
-                        from_i16,
-                        pair.assert_i16()?
-                    );
-                }
-                3 => {
-                    mtext.extended_text.push(pair.assert_string()?);
-                }
-                1 => {
-                    mtext.text = pair.assert_string()?;
-                }
-                7 => {
-                    mtext.text_style_name = pair.assert_string()?;
-                }
-                210 => {
-                    mtext.extrusion_direction.x = pair.assert_f64()?;
-                }
-                220 => {
-                    mtext.extrusion_direction.y = pair.assert_f64()?;
-                }
-                230 => {
-                    mtext.extrusion_direction.z = pair.assert_f64()?;
-                }
-                11 => {
-                    mtext.x_axis_direction.x = pair.assert_f64()?;
-                }
-                21 => {
-                    mtext.x_axis_direction.y = pair.assert_f64()?;
-                }
-                31 => {
-                    mtext.x_axis_direction.z = pair.assert_f64()?;
-                }
-                42 => {
-                    mtext.horizontal_width = pair.assert_f64()?;
-                }
-                43 => {
-                    mtext.vertical_height = pair.assert_f64()?;
-                }
-                50 => {
-                    if reading_column_data {
-                        if read_column_count {
-                            mtext.column_heights.push(pair.assert_f64()?);
-                        } else {
-                            mtext.column_count = pair.assert_f64()? as i32;
-                            read_column_count = true;
-                        }
-                    } else {
-                        mtext.rotation_angle = pair.assert_f64()?;
+                    if let Some(ref mut path) = current_boundary_path {
+                        // Only for polyline paths (bit 2 set)
+                        if (path.boundary_type_flags & 2) != 0 {}
                     }
                 }
                 73 => {
-                    mtext.line_spacing_style = enum_from_number!(
-                        MTextLineSpacingStyle,
-                        AtLeast,
-                        from_i16,
-                        pair.assert_i16()?
-                    );
+                    if let Some(ref mut path) = current_boundary_path {
+                        // Only for polyline paths (bit 2 set)
+                        if (path.boundary_type_flags & 2) != 0 {
+                            // path.is_closed = pair.assert_i32()? == 1;
+                        }
+                    }
+                }
+                93 => {
+                    if let Some(ref mut path) = current_boundary_path {
+                        // Number of vertices (for polyline) or edges (for edge path)
+                        let count = pair.assert_i32()? as usize;
+                        path.edges = Vec::with_capacity(count);
+                    }
+                }
+                10 => {
+                    // X coordinate of vertex
+                    current_vertex.x = pair.assert_f64()?;
+                }
+                20 => {
+                    // Y coordinate of vertex - complete the vertex
+                    current_vertex.y = pair.assert_f64()?;
+
+                    // Add vertex to current boundary path (only for polyline)
+                    if let Some(ref mut path) = current_boundary_path {
+                        if (path.boundary_type_flags & 2) != 0 {
+                            path.edges.push(BoundaryPathEdge::Polyline {
+                                vertex: current_vertex.clone(),
+                            });
+                        }
+                    }
+                }
+                42 => {
+                    // Bulge value (store in z for now)
+                    if let Some(ref mut path) = current_boundary_path {
+                        if (path.boundary_type_flags & 2) != 0 {
+                            current_vertex.z = pair.assert_f64()?;
+                        }
+                    }
+                }
+
+                97 => {
+                    // Source boundary objects count - marks end of boundary path
+                    if let Some(path) = current_boundary_path.take() {
+                        hatch.boundary_paths.push(path);
+                    }
+                    // let source_count = pair.assert_i32()?;
+                    // TODO: Handle source boundary object handles (code 330)
+                }
+
+                // Pattern definition lines
+                78 => {
+                    // Save any remaining boundary path
+                    if let Some(path) = current_boundary_path.take() {
+                        hatch.boundary_paths.push(path);
+                    }
+
+                    let pattern_definition_line_count = pair.assert_i16()? as usize;
+                    hatch.pattern_definition_lines =
+                        Vec::with_capacity(pattern_definition_line_count);
+                }
+                53 => {
+                    if let Some(line) = current_pattern_line.take() {
+                        hatch.pattern_definition_lines.push(line);
+                    }
+                    current_pattern_line = Some(crate::PatternDefinitionLine {
+                        angle: pair.assert_f64()?,
+                        ..Default::default()
+                    });
+                }
+                43 => {
+                    if let Some(ref mut line) = current_pattern_line {
+                        line.base_point.x = pair.assert_f64()?;
+                    }
                 }
                 44 => {
-                    mtext.line_spacing_factor = pair.assert_f64()?;
-                }
-                90 => {
-                    mtext.background_fill_setting =
-                        enum_from_number!(BackgroundFillSetting, Off, from_i32, pair.assert_i32()?);
-                }
-                420 => {
-                    mtext.background_color_rgb = pair.assert_i32()?;
-                }
-                430 => {
-                    mtext.background_color_name = pair.assert_string()?;
+                    if let Some(ref mut line) = current_pattern_line {
+                        line.base_point.y = pair.assert_f64()?;
+                    }
                 }
                 45 => {
-                    mtext.fill_box_scale = pair.assert_f64()?;
+                    if let Some(ref mut line) = current_pattern_line {
+                        line.offset.x = pair.assert_f64()?;
+                    }
                 }
-                63 => {
-                    mtext.background_fill_color = Color::from_raw_value(pair.assert_i16()?);
-                }
-                441 => {
-                    mtext.background_fill_color_transparency = pair.assert_i32()?;
-                }
-                75 => {
-                    mtext.column_type = pair.assert_i16()?;
-                    reading_column_data = true;
-                }
-                76 => {
-                    mtext.column_count = i32::from(pair.assert_i16()?);
-                }
-                78 => {
-                    mtext.is_column_flow_reversed = as_bool(pair.assert_i16()?);
+                46 => {
+                    if let Some(ref mut line) = current_pattern_line {
+                        line.offset.y = pair.assert_f64()?;
+                    }
                 }
                 79 => {
-                    mtext.is_column_auto_height = as_bool(pair.assert_i16()?);
-                }
-                48 => {
-                    mtext.column_width = pair.assert_f64()?;
+                    let dash_count = pair.assert_i16()? as usize;
+                    if let Some(ref mut line) = current_pattern_line {
+                        line.dash_lengths = Vec::with_capacity(dash_count);
+                    }
                 }
                 49 => {
-                    mtext.column_gutter = pair.assert_f64()?;
+                    if let Some(ref mut line) = current_pattern_line {
+                        line.dash_lengths.push(pair.assert_f64()?);
+                    }
                 }
+
+                // Seed points
+                98 => {
+                    if let Some(line) = current_pattern_line.take() {
+                        hatch.pattern_definition_lines.push(line);
+                    }
+                    if let Some(path) = current_boundary_path.take() {
+                        hatch.boundary_paths.push(path);
+                    }
+
+                    let seed_point_count = pair.assert_i32()? as usize;
+                    hatch.seed_points = Vec::with_capacity(seed_point_count);
+                }
+
                 _ => {
-                    common.apply_individual_pair(&pair, iter)?;
+                    // Clean up before delegating
+                    if let Some(line) = current_pattern_line.take() {
+                        hatch.pattern_definition_lines.push(line);
+                    }
+                    if let Some(path) = current_boundary_path.take() {
+                        hatch.boundary_paths.push(path);
+                    }
+
+                    let mut entity_type = EntityType::Hatch(hatch.clone());
+                    if !entity_type.try_apply_code_pair(&pair)? {
+                        common.apply_individual_pair(&pair, iter)?;
+                    } else {
+                        if let EntityType::Hatch(updated_hatch) = entity_type {
+                            *hatch = updated_hatch;
+                        }
+                    }
                 }
             }
         }
@@ -1333,6 +1884,12 @@ impl Entity {
             }
             EntityType::Vertex(ref v) => {
                 Entity::add_custom_code_pairs_vertex(pairs, v, version);
+            }
+            EntityType::MLeader(ref leader) => {
+                Entity::add_custom_code_pairs_mleader(pairs, leader, version);
+            }
+            EntityType::Hatch(ref hatch) => {
+                Self::add_custom_code_pairs_hatch(pairs, hatch, version);
             }
             _ => return false, // no custom code pairs
         }
@@ -1529,7 +2086,9 @@ impl Entity {
                 pairs.push(CodePair::new_i16(74, v.polyface_mesh_vertex_index4 as i16));
             }
         }
-        if version >= AcadVersion::R2010 {
+
+        // Even though the identifier is part of the spec https://help.autodesk.com/view/OARX/2025/ENU/?guid=GUID-0741E831-599E-4CBF-91E1-8ADBCFD6556D AutoCAD can't handle 91 group code. So we do not write it for R2018 and later.
+        if version >= AcadVersion::R2010 && !v.is_3d_polyline_vertex() {
             pairs.push(CodePair::new_i32(91, v.identifier));
         }
         true
@@ -1617,12 +2176,262 @@ impl Entity {
         pairs.push(CodePair::new_str(0, "SEQEND"));
         if write_handles {
             pairs.push(CodePair::new_string(5, &handle.as_string()));
+            pairs.push(CodePair::new_string(100, "AcDbEntity"));
         }
+    }
+
+    fn push_boundary_edge(pairs: &mut Vec<CodePair>, edge: &BoundaryPathEdge) {
+        if let crate::BoundaryPathEdge::Polyline { vertex } = edge {
+            pairs.push(CodePair::new_f64(10, vertex.x));
+            pairs.push(CodePair::new_f64(20, vertex.y));
+        }
+    }
+
+    fn add_custom_code_pairs_hatch(
+        pairs: &mut Vec<CodePair>,
+        hatch: &Hatch,
+        _version: AcadVersion,
+    ) {
+        // Write hatch subclass marker
+        pairs.push(CodePair::new_str(100, "AcDbHatch"));
+
+        // Write basic hatch properties
+        pairs.push(CodePair::new_f64(10, hatch.elevation.x));
+        pairs.push(CodePair::new_f64(20, hatch.elevation.y));
+        pairs.push(CodePair::new_f64(30, hatch.elevation.z));
+        pairs.push(CodePair::new_f64(210, hatch.extrusion_direction.x));
+        pairs.push(CodePair::new_f64(220, hatch.extrusion_direction.y));
+        pairs.push(CodePair::new_f64(230, hatch.extrusion_direction.z));
+        pairs.push(CodePair::new_string(2, &hatch.hatch_pattern_name));
+        pairs.push(CodePair::new_i16(70, if hatch.solid_fill { 1 } else { 0 }));
+        pairs.push(CodePair::new_i16(71, if hatch.associative { 1 } else { 0 }));
+
+        // Write boundary paths
+        pairs.push(CodePair::new_i32(91, hatch.boundary_paths.len() as i32));
+        for boundary_path in &hatch.boundary_paths {
+            pairs.push(CodePair::new_i32(92, boundary_path.boundary_type_flags));
+
+            let is_close_flag = match boundary_path.is_closed {
+                true => 1,
+                _ => 0,
+            };
+
+            if boundary_path.is_polyline() {
+                // Write polyline boundary
+                pairs.push(CodePair::new_i32(72, 0)); // boundary path type flag: polyline
+                pairs.push(CodePair::new_i32(73, is_close_flag)); // is closed flag
+                pairs.push(CodePair::new_i32(93, boundary_path.edges.len() as i32));
+
+                for edge in &boundary_path.edges {
+                    Entity::push_boundary_edge(pairs, edge);
+                }
+            } else {
+                // Write edge-based boundary (simplified for now)
+                pairs.push(CodePair::new_i32(93, boundary_path.edges.len() as i32));
+                for edge in &boundary_path.edges {
+                    match edge {
+                        crate::BoundaryPathEdge::Line { start, end } => {
+                            pairs.push(CodePair::new_i16(72, 1)); // edge type: line
+                            pairs.push(CodePair::new_f64(10, start.x));
+                            pairs.push(CodePair::new_f64(20, start.y));
+                            pairs.push(CodePair::new_f64(11, end.x));
+                            pairs.push(CodePair::new_f64(21, end.y));
+                        }
+                        crate::BoundaryPathEdge::CircularArc {
+                            center,
+                            radius,
+                            start_angle,
+                            end_angle,
+                            is_counter_clockwise,
+                        } => {
+                            pairs.push(CodePair::new_i16(72, 2)); // edge type: circular arc
+                            pairs.push(CodePair::new_f64(10, center.x));
+                            pairs.push(CodePair::new_f64(20, center.y));
+                            pairs.push(CodePair::new_f64(40, *radius));
+                            pairs.push(CodePair::new_f64(50, *start_angle));
+                            pairs.push(CodePair::new_f64(51, *end_angle));
+                            pairs.push(CodePair::new_i16(
+                                73,
+                                if *is_counter_clockwise { 1 } else { 0 },
+                            ));
+                        }
+                        _ => {
+                            // Skip other edge types for now
+                        }
+                    }
+                }
+            }
+
+            // Write source boundary objects count (usually 0 for non-associative hatches)
+            pairs.push(CodePair::new_i32(
+                97,
+                boundary_path.source_boundary_objects.len() as i32,
+            ));
+            for handle in &boundary_path.source_boundary_objects {
+                pairs.push(CodePair::new_string(330, &handle.as_string()));
+            }
+        }
+
+        // Write remaining hatch properties
+        pairs.push(CodePair::new_i16(75, hatch.hatch_style as i16));
+        pairs.push(CodePair::new_i16(76, hatch.hatch_pattern_type as i16));
+        if hatch.hatch_pattern_angle != 0.0 {
+            pairs.push(CodePair::new_f64(52, hatch.hatch_pattern_angle));
+        }
+        if hatch.hatch_pattern_scale != 1.0 {
+            pairs.push(CodePair::new_f64(41, hatch.hatch_pattern_scale));
+        }
+        if hatch.hatch_pattern_double {
+            pairs.push(CodePair::new_i16(77, 1));
+        }
+
+        // Write pattern definition lines (only if there are actual lines)
+        if hatch.pattern_definition_lines.len() > 0 {
+            pairs.push(CodePair::new_i16(
+                78,
+                hatch.pattern_definition_lines.len() as i16,
+            ));
+        }
+
+        for pattern_line in &hatch.pattern_definition_lines {
+            pairs.push(CodePair::new_f64(53, pattern_line.angle));
+            pairs.push(CodePair::new_f64(43, pattern_line.base_point.x));
+            pairs.push(CodePair::new_f64(44, pattern_line.base_point.y));
+            pairs.push(CodePair::new_f64(45, pattern_line.offset.x));
+            pairs.push(CodePair::new_f64(46, pattern_line.offset.y));
+            pairs.push(CodePair::new_i16(
+                79,
+                pattern_line.dash_lengths.len() as i16,
+            ));
+            for dash_length in &pattern_line.dash_lengths {
+                pairs.push(CodePair::new_f64(49, *dash_length));
+            }
+        }
+
+        // Write pixel size (only if hatch is associative, following C# implementation)
+        if hatch.associative && hatch.pixel_size != 0.0 {
+            pairs.push(CodePair::new_f64(47, hatch.pixel_size));
+        }
+
+        // Write seed points
+        pairs.push(CodePair::new_i32(98, hatch.seed_points.len() as i32));
+        for seed_point in &hatch.seed_points {
+            pairs.push(CodePair::new_f64(10, seed_point.x));
+            pairs.push(CodePair::new_f64(20, seed_point.y));
+        }
+    }
+}
+
+//------------------------------------------------------------------------------
+//                                                                         Hatch
+//------------------------------------------------------------------------------
+impl Hatch {
+    /// Create a new solid-filled hatch with a single boundary path
+    pub fn new_solid_fill(boundary_path: crate::BoundaryPath) -> Self {
+        let mut hatch = Hatch::default();
+        hatch.solid_fill = true;
+        hatch.hatch_pattern_name = String::from("SOLID");
+        hatch.boundary_paths = vec![boundary_path];
+        hatch
+    }
+
+    /// Create a new hatch with a polygon boundary (no holes)
+    pub fn new_polygon_solid_fill(points: Vec<Point>) -> Self {
+        let boundary_path = crate::BoundaryPath::from_polygon(points, true);
+        Self::new_solid_fill(boundary_path)
+    }
+
+    /// Create a new hatch with a rectangular boundary
+    pub fn new_rectangle_solid_fill(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> Self {
+        let boundary_path = crate::BoundaryPath::from_rectangle(min_x, min_y, max_x, max_y, true);
+        Self::new_solid_fill(boundary_path)
+    }
+
+    /// Create a new hatch with a circular boundary
+    pub fn new_circle_solid_fill(center: Point, radius: f64) -> Self {
+        let boundary_path = crate::BoundaryPath::from_circle(center, radius, true);
+        Self::new_solid_fill(boundary_path)
+    }
+
+    /// Create a hatch with holes (polygon with holes)
+    /// The first boundary path should be the outer boundary (external = true)
+    /// All subsequent boundary paths are holes (external = false)
+    pub fn new_polygon_with_holes_solid_fill(
+        outer_points: Vec<Point>,
+        hole_points: Vec<Vec<Point>>,
+    ) -> Self {
+        let mut hatch = Hatch::default();
+        hatch.solid_fill = true;
+        hatch.hatch_pattern_name = String::from("SOLID");
+        hatch.hatch_style = HatchStyle::OddParity;
+
+        hatch.set_path(outer_points);
+        hatch.set_holes(hole_points);
+
+        hatch
+    }
+
+    pub fn set_path(&mut self, points: Vec<Point>) {
+        let outer_boundary = crate::BoundaryPath::from_polygon(points, true);
+        self.boundary_paths.push(outer_boundary);
+    }
+
+    pub fn set_holes(&mut self, holes: Vec<Vec<Point>>) {
+        for hole in holes {
+            let hole_boundary = crate::BoundaryPath::from_polygon(hole, false);
+            self.boundary_paths.push(hole_boundary);
+        }
+    }
+
+    pub fn add_hole(&mut self, hole_points: Vec<Point>) {
+        let hole_boundary = crate::BoundaryPath::from_polygon(hole_points, false);
+        self.boundary_paths.push(hole_boundary);
+    }
+
+    pub fn add_circular_hole(&mut self, center: Point, radius: f64) {
+        let hole_boundary = crate::BoundaryPath::from_circle(center, radius, false);
+        self.boundary_paths.push(hole_boundary);
+    }
+
+    pub fn add_rectangular_hole(&mut self, min_x: f64, min_y: f64, max_x: f64, max_y: f64) {
+        let hole_boundary = crate::BoundaryPath::from_rectangle(min_x, min_y, max_x, max_y, false);
+        self.boundary_paths.push(hole_boundary);
+    }
+
+    pub fn add_pattern_definition_line(&mut self, pattern_line: crate::PatternDefinitionLine) {
+        self.pattern_definition_lines.push(pattern_line);
+    }
+
+    pub fn add_seed_point(&mut self, seed_point: Point) {
+        self.seed_points.push(seed_point);
+    }
+
+    pub fn set_normal_vector(&mut self, normal: Vector) {
+        self.extrusion_direction = normal;
+    }
+
+    pub fn normal_vector(&self) -> &Vector {
+        &self.extrusion_direction
+    }
+
+    pub fn new_pattern_fill(
+        boundary_path: crate::BoundaryPath,
+        pattern_name: String,
+        pattern_lines: Vec<crate::PatternDefinitionLine>,
+    ) -> Self {
+        let mut hatch = Hatch::default();
+        hatch.solid_fill = false;
+        hatch.hatch_pattern_name = pattern_name;
+        hatch.boundary_paths = vec![boundary_path];
+        hatch.pattern_definition_lines = pattern_lines;
+        hatch
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::vec;
+
     use crate::entities::*;
     use crate::enums::*;
     use crate::helper_functions::tests::*;
@@ -1636,6 +2445,28 @@ mod tests {
             pairs.push(pair);
         }
         let drawing = from_section("ENTITIES", pairs);
+        let entities = drawing.entities().collect::<Vec<_>>();
+        assert_eq!(1, entities.len());
+        entities[0].clone()
+    }
+
+    fn read_hatch_entity(body: Vec<CodePair>) -> Entity {
+        let mut pairs = vec![
+            CodePair::new_str(0, "SECTION"),
+            CodePair::new_str(2, "HEADER"),
+            CodePair::new_str(9, "$ACADVER"),
+            CodePair::new_str(1, "AC1014"), // R14
+            CodePair::new_str(0, "ENDSEC"),
+            CodePair::new_str(0, "SECTION"),
+            CodePair::new_str(2, "ENTITIES"),
+            CodePair::new_str(0, "HATCH"),
+        ];
+        for pair in body {
+            pairs.push(pair);
+        }
+        pairs.push(CodePair::new_str(0, "ENDSEC"));
+        pairs.push(CodePair::new_str(0, "EOF"));
+        let drawing = drawing_from_pairs(pairs);
         let entities = drawing.entities().collect::<Vec<_>>();
         assert_eq!(1, entities.len());
         entities[0].clone()
@@ -1750,7 +2581,7 @@ mod tests {
             &drawing,
             vec![
                 CodePair::new_str(0, "LINE"),
-                CodePair::new_str(5, "10"),
+                CodePair::new_str(5, "1E"),
                 CodePair::new_str(8, "some-layer"),
                 CodePair::new_f64(10, 0.0),
             ],
@@ -1771,7 +2602,7 @@ mod tests {
             &drawing,
             vec![
                 CodePair::new_str(0, "LINE"),
-                CodePair::new_str(5, "10"),
+                CodePair::new_str(5, "1E"),
                 CodePair::new_str(100, "AcDbEntity"),
                 CodePair::new_str(8, "some-layer"),
                 CodePair::new_str(100, "AcDbLine"),
@@ -2025,6 +2856,712 @@ mod tests {
     }
 
     #[test]
+    fn read_entity_mtext_with_embedded_object() {
+        // Arrange
+        let entity = read_entity(
+            "MTEXT",
+            vec![
+                // CodePair::new_i16(5, 764),
+                CodePair::new_str(102, "{ACAD_XDICTIONARY"),
+                CodePair::new_i32(360, 765),
+                CodePair::new_str(102, "}"),
+                // CodePair::new_i16(330, 31),
+                CodePair::new_str(100, "AcDbEntity"),
+                CodePair::new_str(8, "Proj_ledninger$0$TF_K_---_Tekst-"),
+                CodePair::new_str(100, "AcDbMText"),
+                CodePair::new_f64(10, 676538913.4250469),
+                CodePair::new_f64(20, 6147397473.123696),
+                CodePair::new_f64(30, -152.5233843860332),
+                CodePair::new_f64(40, 400.0),
+                CodePair::new_f64(41, 6126.179808862732),
+                CodePair::new_f64(46, 0.0),
+                CodePair::new_i16(71, 1),
+                CodePair::new_i16(72, 5),
+                CodePair::new_str(1, "SHARH80\\PØ1250 Br.\\PDK: 48.25\\PBK: 45.22"),
+                CodePair::new_str(7, "Proj_ledninger$0$Arial"),
+                CodePair::new_f64(11, 0.2644180576221719),
+                CodePair::new_f64(21, 0.9644081557117392),
+                CodePair::new_f64(31, 0.0),
+                CodePair::new_i16(73, 1),
+                CodePair::new_f64(44, 1.0),
+                // Embedded random object data
+                CodePair::new_str(101, "Embedded Object"),
+                CodePair::new_i16(70, 1),
+                CodePair::new_f64(10, 0.2644180576221719),
+                CodePair::new_f64(20, 0.9644081557117392),
+                CodePair::new_f64(30, 0.0),
+                CodePair::new_f64(11, 676538913.4250469),
+                CodePair::new_f64(21, 6147397473.123696),
+                CodePair::new_f64(31, -152.5233843860332),
+                CodePair::new_f64(40, 400.0),
+                CodePair::new_f64(41, 0.0),
+                CodePair::new_f64(42, 2525.784447476126),
+                CodePair::new_f64(43, 2431.650750341065),
+                CodePair::new_i16(71, 2),
+                CodePair::new_i16(72, 1),
+                CodePair::new_f64(44, 6126.179808862732),
+                CodePair::new_f64(45, 5000.0),
+                CodePair::new_i16(73, 0),
+                CodePair::new_i16(74, 0),
+                CodePair::new_f64(46, 0.0),
+                CodePair::new_str(1001, "AcadAnnotative"),
+                CodePair::new_str(1000, "AnnotativeData"),
+                CodePair::new_str(1002, "{"),
+                CodePair::new_i16(1070, 1),
+                CodePair::new_i16(1070, 1),
+                CodePair::new_str(1002, "}"),
+            ],
+        );
+
+        // Assert
+        match entity.specific {
+            EntityType::MText(ref mtext) => {
+                assert_eq!(
+                    Point::new(676538913.4250469, 6147397473.123696, -152.5233843860332),
+                    mtext.insertion_point
+                );
+                assert_eq!(400.0, mtext.initial_text_height);
+                assert_eq!(6126.179808862732, mtext.reference_rectangle_width);
+                assert_eq!(0.0, mtext.rotation_angle);
+                assert_eq!("SHARH80\\PØ1250 Br.\\PDK: 48.25\\PBK: 45.22", mtext.text);
+                assert_eq!("Proj_ledninger$0$Arial", mtext.text_style_name);
+                assert_eq!(0.2644180576221719, mtext.x_axis_direction.x);
+                assert_eq!(0.9644081557117392, mtext.x_axis_direction.y);
+                assert_eq!(0.0, mtext.x_axis_direction.z);
+                assert_eq!(1.0, mtext.line_spacing_factor);
+            }
+            _ => panic!("expected an MTEXT"),
+        }
+    }
+
+    #[test]
+    fn read_multi_leader() {
+        // Arrange
+        let entity = read_entity(
+            "MULTILEADER",
+            vec![
+                CodePair::new_str(102, "{ACAD_XDICTIONARY"),
+                CodePair::new_i32(360, 301),
+                CodePair::new_str(102, "}"),
+                CodePair::new_str(100, "AcDbEntity"),
+                CodePair::new_str(8, "Proj_ledninger$0$TF_K_---_Leader-"),
+                CodePair::new_i16(160, 452),
+                CodePair::new_str(100, "AcDbMLeader"),
+                CodePair::new_i16(270, 2),
+                CodePair::new_str(300, "CONTEXT_DATA{"), // start of CONTEXT_DATA
+                CodePair::new_f64(40, 200.0),
+                CodePair::new_f64(10, 676536270.82997),
+                CodePair::new_f64(20, 6147398029.870995),
+                CodePair::new_f64(30, 41.18369923159479),
+                CodePair::new_f64(41, 500.0),
+                CodePair::new_f64(140, 500.0),
+                CodePair::new_f64(145, 400.0),
+                CodePair::new_i16(174, 1),
+                CodePair::new_i16(175, 1),
+                CodePair::new_i16(176, 0),
+                CodePair::new_i16(177, 0),
+                CodePair::new_i16(290, 1),
+                CodePair::new_str(304, "Great MLEADER {\\fArial;content}"),
+                CodePair::new_f64(11, 0.0),
+                CodePair::new_f64(21, 0.0),
+                CodePair::new_f64(31, 1.0),
+                CodePair::new_i16(340, 715), // 2CB in hex is 715
+                CodePair::new_f64(12, 676536406.164786),
+                CodePair::new_f64(22, 6147397578.003218),
+                CodePair::new_f64(32, 41.18369923159479),
+                CodePair::new_f64(13, -0.2644180576221713),
+                CodePair::new_f64(23, -0.9644081557117392),
+                CodePair::new_f64(33, 0.0),
+                CodePair::new_f64(42, 4.444788527204954),
+                CodePair::new_f64(43, 0.0),
+                CodePair::new_f64(44, 0.0),
+                CodePair::new_f64(45, 1.0),
+                CodePair::new_i16(170, 1),
+                CodePair::new_i32(90, -1028521984),
+                CodePair::new_i16(171, 1),
+                CodePair::new_i16(172, 5),
+                CodePair::new_i32(91, -1073741824),
+                CodePair::new_f64(141, 0.0),
+                CodePair::new_i32(92, 0),
+                CodePair::new_i16(291, 0),
+                CodePair::new_i16(292, 0),
+                CodePair::new_i16(173, 0),
+                CodePair::new_i16(293, 0),
+                CodePair::new_f64(142, 0.0),
+                CodePair::new_f64(143, 0.0),
+                CodePair::new_i16(294, 0),
+                CodePair::new_i16(295, 0),
+                CodePair::new_i16(296, 0),
+                CodePair::new_f64(110, 676538419.6360937),
+                CodePair::new_f64(120, 6147411946.366201),
+                CodePair::new_f64(130, 41.18369923159479),
+                CodePair::new_f64(111, -0.2644180576221713),
+                CodePair::new_f64(121, -0.9644081557117392),
+                CodePair::new_f64(131, 0.0),
+                CodePair::new_f64(112, 0.9644081557117392),
+                CodePair::new_f64(122, -0.2644180576221713),
+                CodePair::new_f64(132, 0.0),
+                CodePair::new_i16(297, 0),
+                CodePair::new_str(302, "LEADER{"), // start of LEADER
+                CodePair::new_i16(290, 1),
+                CodePair::new_i16(291, 1),
+                CodePair::new_f64(10, 676537064.180925),
+                CodePair::new_f64(20, 6147400923.448454),
+                CodePair::new_f64(30, 41.18369923159479),
+                CodePair::new_f64(11, -0.2644180576221713), // Dogleg direction vector x
+                CodePair::new_f64(21, -0.9644081557117392), // Dogleg direction vector y
+                CodePair::new_f64(31, 0.0),                 // Dogleg direction vector z
+                CodePair::new_i32(90, 0),
+                CodePair::new_f64(40, 3000.366019534463), // dogleg length
+                CodePair::new_str(304, "LEADER_LINE{"),   // start of LEADER_LINE
+                CodePair::new_f64(10, 676548478.6502683),
+                CodePair::new_f64(20, 6147400741.812067),
+                CodePair::new_f64(30, 41.18369923159479),
+                CodePair::new_i32(91, 0),
+                CodePair::new_str(305, "}"), // end of LEADER_LINE
+                CodePair::new_i16(271, 0),
+                CodePair::new_str(303, "}"), // end of LEADER
+                CodePair::new_i16(272, 9),
+                CodePair::new_i16(273, 9),
+                CodePair::new_str(301, "}"), // end of CONTEXT_DATA
+                CodePair::new_i16(340, 725), // 2D5 in hex is 725
+                CodePair::new_i32(90, 279744),
+                CodePair::new_i16(170, 1),
+                CodePair::new_i32(91, -1073741824),
+                CodePair::new_i16(341, 20), // 14 in hex is 20
+                CodePair::new_i16(171, -2),
+                CodePair::new_i16(290, 1),
+                CodePair::new_i16(291, 1),
+                CodePair::new_f64(41, 15.0018300976723),
+                CodePair::new_f64(42, 2.5),
+                CodePair::new_i16(172, 2),
+                CodePair::new_i16(343, 715), // 2CB in hex is 715
+                CodePair::new_i16(173, 1),
+                CodePair::new_i32(95, 1),
+                CodePair::new_i16(174, 1),
+                CodePair::new_i16(175, 0),
+                CodePair::new_i32(92, -1023410175),
+                CodePair::new_i16(292, 0),
+                CodePair::new_i32(93, -1056964608),
+                CodePair::new_f64(10, 1.0),
+                CodePair::new_f64(20, 1.0),
+                CodePair::new_f64(30, 1.0),
+                CodePair::new_f64(43, 0.0),
+                CodePair::new_i16(176, 0),
+                CodePair::new_i16(293, 1),
+                CodePair::new_i16(294, 0),
+                CodePair::new_i16(178, 0),
+                CodePair::new_i16(179, 1),
+                CodePair::new_f64(45, 1.0),
+                CodePair::new_i16(271, 0),
+                CodePair::new_i16(272, 9),
+                CodePair::new_i16(273, 9),
+                CodePair::new_i16(295, 1),
+            ],
+        );
+
+        // Assert
+        match entity.specific {
+            EntityType::MLeader(ref mleader) => {
+                assert_eq!(mleader.enable_dogleg, true);
+                assert_eq!(mleader.enable_dogleg, true);
+                assert_eq!(mleader.dogleg_length, 3000.366019534463);
+                assert_eq!(
+                    mleader.dogleg_vector,
+                    Vector::new(-0.2644180576221713, -0.9644081557117392, 0.0)
+                );
+                assert_eq!(mleader.vertices.len(), 1);
+
+                // Text content
+                assert_eq!(mleader.content_type, MLeaderContentType::MTextContent);
+                assert_eq!(
+                    mleader.default_text_contents,
+                    "Great MLEADER {\\fArial;content}"
+                );
+
+                // base point
+                assert_eq!(
+                    mleader.content_base_point,
+                    Point {
+                        x: 676536270.82997,
+                        y: 6147398029.870995,
+                        z: 41.18369923159479
+                    }
+                );
+
+                // Last leader line end point
+                assert_eq!(
+                    mleader.last_leader_line_point,
+                    Point {
+                        x: 676537064.180925,
+                        y: 6147400923.448454,
+                        z: 41.18369923159479
+                    }
+                );
+
+                // Dogleg included vertices
+                assert_eq!(
+                    mleader.get_vertices(),
+                    vec![
+                        Point {
+                            x: 676536270.82997,
+                            y: 6147398029.870995,
+                            z: 41.18369923159479
+                        },
+                        Point {
+                            x: 676537064.180925,
+                            y: 6147400923.448454,
+                            z: 41.18369923159479
+                        },
+                        Point {
+                            x: 676548478.6502683,
+                            y: 6147400741.812067,
+                            z: 41.18369923159479
+                        }
+                    ]
+                );
+
+                // Text normal direction (11,21,31)
+                assert_eq!(mleader.text_normal_direction, Vector::new(0.0, 0.0, 1.0));
+
+                // Text location (12,22,32)
+                assert_eq!(
+                    mleader.text_location,
+                    Point {
+                        x: 676536406.164786,
+                        y: 6147397578.003218,
+                        z: 41.18369923159479
+                    }
+                );
+
+                // Text properties
+                assert_eq!(mleader.text_height, 500.0);
+                assert_eq!(mleader.text_rotation, 4.444788527204954);
+                assert_eq!(mleader.text_width, 0.0);
+                assert_eq!(mleader.text_attachment, 1);
+            }
+            _ => panic!("expected a MLeader"),
+        }
+
+        assert_eq!(entity.common.layer, "Proj_ledninger$0$TF_K_---_Leader-");
+    }
+
+    #[test]
+    fn read_multi_leader_danish_text() {
+        // Arrange
+        let entity = read_entity(
+            "MULTILEADER",
+            vec![
+                CodePair::new_str(100, "AcDbEntity"),
+                CodePair::new_str(8, "L 50- - SÅLEDES UDFØRT Tekst"),
+                CodePair::new_i16(160, 2492),
+                CodePair::new_str(100, "AcDbMLeader"),
+                CodePair::new_i16(270, 2),
+                CodePair::new_str(300, "CONTEXT_DATA{"), // start of CONTEXT_DATA
+                CodePair::new_f64(40, 1.0),
+                CodePair::new_f64(10, 648648030.3511316),
+                CodePair::new_f64(20, 1174316399.052236),
+                CodePair::new_f64(30, 0.0),
+                CodePair::new_f64(41, 300.0),
+                CodePair::new_f64(140, 200.0),
+                CodePair::new_f64(145, 100.0),
+                CodePair::new_i16(174, 1),
+                CodePair::new_i16(175, 1),
+                CodePair::new_i16(176, 0),
+                CodePair::new_i16(177, 0),
+                CodePair::new_i16(290, 1),
+                CodePair::new_str(304, "{\\fArial|b1|i0|c0|p34;FV01B17\\PDK }8.50\\P{\\fArial|b1|i0|c0|p34;IK }6.64^J{\\fArial|b1|i0|c0|p34;UK }6.27\\P{\\fArial|b1|i0|c0|p34;BK }5.60"),
+                CodePair::new_f64(11, 0.0),
+                CodePair::new_f64(21, 0.0),
+                CodePair::new_f64(31, 1.0),
+                CodePair::new_i16(340, 17), // 11 in hex is 17
+                CodePair::new_f64(12, 648648188.7703227),
+                CodePair::new_f64(22, 1174316489.480647),
+                CodePair::new_f64(32, 0.0),
+                CodePair::new_f64(13, 0.8907119816332103),
+                CodePair::new_f64(23, -0.4545681090607213),
+                CodePair::new_f64(33, 0.0),
+                CodePair::new_f64(42, 5.811298035900279),
+                CodePair::new_f64(43, 0.0),
+                CodePair::new_f64(44, 0.0),
+                CodePair::new_f64(45, 1.0),
+                CodePair::new_i16(170, 1),
+                CodePair::new_i32(90, -1073741824),
+                CodePair::new_i16(171, 1),
+                CodePair::new_i16(172, 5),
+                CodePair::new_i32(91, -1073741824),
+                CodePair::new_f64(141, 1.199999999999999),
+                CodePair::new_i32(92, 0),
+                CodePair::new_i16(291, 1),
+                CodePair::new_i16(292, 1),
+                CodePair::new_i16(173, 0),
+                CodePair::new_i16(293, 0),
+                CodePair::new_f64(142, 0.0),
+                CodePair::new_f64(143, 0.0),
+                CodePair::new_i16(294, 0),
+                CodePair::new_i16(295, 0),
+                CodePair::new_i16(296, 0),
+                CodePair::new_f64(110, 648652444.1320328),
+                CodePair::new_f64(120, 1174314908.43074),
+                CodePair::new_f64(130, 0.0),
+                CodePair::new_f64(111, 0.8907119816332103),
+                CodePair::new_f64(121, -0.4545681090607213),
+                CodePair::new_f64(131, 0.0),
+                CodePair::new_f64(112, 0.4545681090607213),
+                CodePair::new_f64(122, 0.8907119816332103),
+                CodePair::new_f64(132, 0.0),
+                CodePair::new_i16(297, 0),
+                CodePair::new_str(302, "LEADER{"), // start of LEADER
+                CodePair::new_i16(290, 1),
+                CodePair::new_i16(291, 1),
+                CodePair::new_f64(10, 648650186.7733452),
+                CodePair::new_f64(20, 1174315298.538503),
+                CodePair::new_f64(30, 0.0),
+                CodePair::new_f64(11, -0.8907119816332102), // Dogleg direction vector x
+                CodePair::new_f64(21, 0.4545681090607215),  // Dogleg direction vector y
+                CodePair::new_f64(31, 0.0),                 // Dogleg direction vector z
+                CodePair::new_i32(90, 0),
+                CodePair::new_f64(40, 500.0000000000002), // dogleg length
+                CodePair::new_str(304, "LEADER_LINE{"),   // start of LEADER_LINE
+                CodePair::new_f64(10, 648652198.1563798),
+                CodePair::new_f64(20, 1174315906.356325),
+                CodePair::new_f64(30, 0.0),
+                CodePair::new_i32(91, 0),
+                CodePair::new_str(305, "}"), // end of LEADER_LINE
+                CodePair::new_i16(271, 0),
+                CodePair::new_str(303, "}"), // end of LEADER
+                CodePair::new_i16(272, 9),
+                CodePair::new_i16(273, 9),
+                CodePair::new_str(301, "}"), // end of CONTEXT_DATA
+                CodePair::new_i16(340, 302), // 12E in hex is 302
+                CodePair::new_i32(90, 67585696),
+                CodePair::new_i16(170, 1),
+                CodePair::new_i32(91, -1056964608),
+                CodePair::new_i16(341, 20), // 14 in hex is 20
+                CodePair::new_i16(171, -2),
+                CodePair::new_i16(290, 1),
+                CodePair::new_i16(291, 1),
+                CodePair::new_f64(41, 500.0),
+                CodePair::new_f64(42, 200.0),
+                CodePair::new_i16(172, 2),
+                CodePair::new_i16(343, 17), // 11 in hex is 17
+                CodePair::new_i16(173, 1),
+                CodePair::new_i32(95, 1),
+                CodePair::new_i16(174, 1),
+                CodePair::new_i16(175, 0),
+                CodePair::new_i32(92, -1056964608),
+                CodePair::new_i16(292, 1),
+                CodePair::new_i32(93, -1056964608),
+                CodePair::new_f64(10, 1.0),
+                CodePair::new_f64(20, 1.0),
+                CodePair::new_f64(30, 1.0),
+                CodePair::new_f64(43, 0.0),
+                CodePair::new_i16(176, 0),
+                CodePair::new_i16(293, 0),
+                CodePair::new_i16(294, 0),
+                CodePair::new_i16(178, 1),
+                CodePair::new_i16(179, 1),
+                CodePair::new_f64(45, 1.0),
+                CodePair::new_i16(271, 0),
+                CodePair::new_i16(272, 9),
+                CodePair::new_i16(273, 9),
+                CodePair::new_i16(295, 0),
+            ],
+        );
+
+        // Assert
+        match entity.specific {
+            EntityType::MLeader(ref mleader) => {
+                assert_eq!(mleader.enable_dogleg, true);
+                assert_eq!(mleader.dogleg_length, 500.0000000000002);
+                assert_eq!(
+                    mleader.dogleg_vector,
+                    Vector::new(-0.8907119816332102, 0.4545681090607215, 0.0)
+                );
+                assert_eq!(mleader.vertices.len(), 1);
+
+                // Text content - Danish utility planning text with formatting
+                assert_eq!(mleader.content_type, MLeaderContentType::MTextContent);
+                assert_eq!(mleader.default_text_contents, "{\\fArial|b1|i0|c0|p34;FV01B17\\PDK }8.50\\P{\\fArial|b1|i0|c0|p34;IK }6.64^J{\\fArial|b1|i0|c0|p34;UK }6.27\\P{\\fArial|b1|i0|c0|p34;BK }5.60");
+
+                // Base point
+                assert_eq!(
+                    mleader.content_base_point,
+                    Point {
+                        x: 648648030.3511316,
+                        y: 1174316399.052236,
+                        z: 0.0
+                    }
+                );
+
+                // Last leader line point
+                assert_eq!(
+                    mleader.last_leader_line_point,
+                    Point {
+                        x: 648650186.7733452,
+                        y: 1174315298.538503,
+                        z: 0.0
+                    }
+                );
+
+                // Dogleg included vertices
+                assert_eq!(
+                    mleader.get_vertices(),
+                    vec![
+                        Point {
+                            x: 648649741.4173545,
+                            y: 1174315525.8225574,
+                            z: 0.0
+                        },
+                        Point {
+                            x: 648650186.7733452,
+                            y: 1174315298.538503,
+                            z: 0.0
+                        },
+                        Point {
+                            x: 648652198.1563798,
+                            y: 1174315906.356325,
+                            z: 0.0
+                        }
+                    ]
+                );
+
+                // Text location for Danish test
+                assert_eq!(
+                    mleader.text_location,
+                    Point {
+                        x: 648648188.7703227,
+                        y: 1174316489.480647,
+                        z: 0.0
+                    }
+                );
+
+                assert_eq!(mleader.text_normal_direction, Vector::new(0.0, 0.0, 1.0));
+
+                // Text properties for Danish test
+                assert_eq!(mleader.text_height, 300.0);
+                assert_eq!(mleader.text_rotation, 5.811298035900279);
+            }
+            _ => panic!("expected a MLeader"),
+        }
+
+        assert_eq!(entity.common.layer, "L 50- - SÅLEDES UDFØRT Tekst");
+    }
+
+    #[test]
+    fn write_multi_leader_basic() {
+        let mut drawing = Drawing::new();
+        drawing.header.version = AcadVersion::R2018;
+        let mut mleader = MLeader::default();
+        mleader.content_type = MLeaderContentType::MTextContent;
+        mleader.enable_landing = true;
+
+        // Text content
+        mleader.default_text_contents = "Great MLEADER content\nTest".to_string();
+        mleader.has_m_text = true;
+        mleader.enable_frame_text = true;
+        mleader.text_height = 0.18;
+        mleader.text_direction = Vector::new(1.0, 0.0, 0.0); // text reading direction
+        mleader.text_normal_direction = Vector::new(0.0, 0.0, 1.0); // text plane normal
+        mleader.text_attachment = 1;
+        mleader.vertices = vec![
+            Point::new(0.0, 0.0, 0.0), // ONLY the arrow start point
+        ];
+
+        // Set the vertex point (from working DXF - this appears before LEADER{ section)
+        mleader.vertex = Point::new(0.0, 0.0, 0.0);
+        mleader.break_point_index = 0;
+
+        // Last leader line point - where the dogleg starts (NOT same as vertices)
+        mleader.last_leader_line_point = Point::new(2.5, 1.0, 0.0);
+        mleader.has_set_last_leader_line_point = true;
+
+        // Dogleg settings
+        mleader.enable_dogleg = true;
+        mleader.dogleg_length = 0.3;
+        mleader.dogleg_length_leader = 0.3;
+        mleader.dogleg_vector = Vector::new(1.0, 0.0, 0.0); // points right toward text
+        mleader.has_set_dogleg_vector = true;
+
+        // Content positioning (matches working DXF values)
+        mleader.content_base_point = Point::new(2.8, 1.0, 0.0);
+        mleader.text_location = Point::new(2.94, 1.0, 0.0);
+
+        // Context data
+        let landing_gap = 0.14;
+        mleader.landing_gap = landing_gap;
+        mleader.arrow_head_size = 0.18;
+        mleader.content_scale = 1.0;
+
+        // Additional properties from working DXF
+        mleader.break_point_index_line = 0;
+
+        drawing.add_entity(Entity {
+            common: EntityCommon {
+                layer: "Proj_ledninger$0$TF_K_---_Leader-".to_string(),
+                ..Default::default()
+            },
+            specific: EntityType::MLeader(mleader),
+        });
+
+        assert_contains_pairs(
+            &drawing,
+            vec![
+                CodePair::new_str(0, "MULTILEADER"),
+                CodePair::new_str(5, "1E"),
+                CodePair::new_str(100, "AcDbEntity"),
+                CodePair::new_str(8, "Proj_ledninger$0$TF_K_---_Leader-"),
+                CodePair::new_str(347, "0"), // sentinel for DXF version
+                CodePair::new_i16(370, 0),   // sentinel for DXF version
+                CodePair::new_str(430, ""),
+                CodePair::new_i32(440, 0),   // sentinel for DX
+                CodePair::new_str(390, "0"), // sentinel for DXF version
+                CodePair::new_i16(284, 0),   // sentinel for DXF version
+                CodePair::new_str(100, "AcDbMLeader"),
+                // Version number
+                // Common MLeader Group Codes (before context data)
+                CodePair::new_i16(270, 2),
+                CodePair::new_string(340, "Standard"), // start of LEADER
+                CodePair::new_i32(90, 0),              // property_override_flag
+                CodePair::new_i16(170, 1),             // leader_line_type (Straight)
+                CodePair::new_i32(91, -1073741824),    // leader_line_color
+                CodePair::new_i16(171, -1),            // leader_line_weight
+                CodePair::new_i16(290, 1),             // enable_landing
+                CodePair::new_i16(291, 1),             // enable_dogleg
+                CodePair::new_f64(41, 0.3),            // dogleg_length
+                CodePair::new_f64(42, 0.18),           // arrowhead_size
+                CodePair::new_i16(172, 2),             // content_type (MTextContent)
+                CodePair::new_i16(173, 1),             // text_left_attachment_type
+                CodePair::new_i16(95, 1),              // text_right_attachment_type
+                CodePair::new_i16(174, 0),             // text_angle_type
+                CodePair::new_i16(175, 0),             // text_alignment_type
+                CodePair::new_i32(92, -1073741824),    // text_color
+                CodePair::new_i16(292, 1),             // enable_frame_text
+                // CodePair::new_i32(93, 256), // block_content_color
+                // CodePair::new_f64(10, 1.0), // block_content_scale
+                // CodePair::new_f64(43, 0.0), // block_content_rotation
+                // CodePair::new_i16(176, 0),  // block_content_connection_type
+                CodePair::new_i16(293, 0), // enable_annotation_scale
+                CodePair::new_i32(94, 0),  // arrowhead_index
+                // CodePair::new_i16(177, 0),  // block_attribute_index
+                // CodePair::new_f64(44, 0.0), // block_attribute_width
+                CodePair::new_i16(294, 0), // text_direction_negative
+                CodePair::new_i16(178, 0), // text_align_in_ipe
+                CodePair::new_i16(179, 1), // text_attachment_point
+                CodePair::new_i16(271, 0), // text_attachment_direction
+                CodePair::new_i16(272, 9), // bottom_text_attachment_direction
+                CodePair::new_i16(273, 9), // top_text_attachment_direction
+                // CONTEXT_DATA Section
+                CodePair::new_str(300, "CONTEXT_DATA{"),
+                // MLeader Context Data Group Codes
+                CodePair::new_f64(40, 1.0),   // content_scale
+                CodePair::new_f64(10, 2.8),   // content_base_point.x
+                CodePair::new_f64(20, 1.0),   // content_base_point.y
+                CodePair::new_f64(30, 0.0),   // content_base_point.z
+                CodePair::new_f64(41, 0.18),  // text_height
+                CodePair::new_f64(140, 0.18), // arrow_head_size
+                CodePair::new_f64(145, 0.14), // landing_gap
+                CodePair::new_i16(290, 1),    // has_m_text
+                CodePair::new_str(304, "Great MLEADER content\nTest"), // default_text_contents
+                CodePair::new_f64(11, 0.0),   // text_normal_direction.x
+                CodePair::new_f64(21, 0.0),   // text_normal_direction.y
+                CodePair::new_f64(31, 1.0),   // text_normal_direction.z
+                CodePair::new_f64(12, 2.94),  // text_location.x
+                CodePair::new_f64(22, 1.0),   // text_location.y
+                CodePair::new_f64(32, 0.0),   // text_location.z
+                CodePair::new_f64(13, 1.0),   // text_direction.x
+                CodePair::new_f64(23, 0.0),   // text_direction.y
+                CodePair::new_f64(33, 0.0),   // text_direction.z
+                CodePair::new_f64(42, 0.0),   // text_rotation
+                CodePair::new_f64(43, 0.0),   // text_width
+                CodePair::new_f64(44, 0.0),   // text_height_context
+                CodePair::new_f64(45, 1.0),   // text_line_spacing_factor
+                CodePair::new_i16(170, 1),    // text_line_spacing_style
+                CodePair::new_i32(90, -1073741824), // text_color_context
+                CodePair::new_i16(171, 1),    // text_attachment
+                CodePair::new_i16(172, 1),    // text_flow_direction
+                CodePair::new_i32(91, -1073741824), // text_background_color
+                CodePair::new_f64(141, 1.5),  // text_background_scale_factor
+                CodePair::new_i32(92, 0),     // text_background_transparency
+                CodePair::new_i16(291, 0),    // is_text_background_color_on
+                CodePair::new_i16(292, 0),    // is_text_background_fill_on
+                CodePair::new_i16(173, 0),    // text_column_type
+                CodePair::new_i16(293, 0),    // use_text_auto_height
+                CodePair::new_f64(142, 0.0),  // text_column_width
+                CodePair::new_f64(143, 0.0),  // text_column_gutter_width
+                CodePair::new_i16(294, 0),    // text_column_flow_reversed
+                CodePair::new_f64(144, 0.0),  // text_column_height
+                CodePair::new_i16(295, 0),    // text_use_word_break
+                CodePair::new_i16(296, 0),    // has_block
+                // CodePair::new_f64(14, 0.0),   // block_content_normal_direction.x
+                // CodePair::new_f64(24, 0.0),   // block_content_normal_direction.y
+                // CodePair::new_f64(34, 0.0),   // block_content_normal_direction.z
+                // CodePair::new_f64(15, 0.0),   // block_content_position.x
+                // CodePair::new_f64(25, 0.0),   // block_content_position.y
+                // CodePair::new_f64(35, 0.0),   // block_content_position.z
+                // CodePair::new_f64(16, 1.0),   // block_content_scale_context
+                // CodePair::new_f64(46, 0.0),   // block_content_rotation_context
+                // CodePair::new_i32(93, 256),   // block_content_color_context
+                // CodePair::new_f64(47, 0.0),   // block_transformation_matrix
+                // CodePair::new_f64(110, 0.0),  // mleader_plane_origin_point.x
+                // CodePair::new_f64(111, 1.0),  // mleader_plane_x_axis_direction.x
+                // CodePair::new_f64(112, 0.0),  // mleader_plane_y_axis_direction.x
+                // CodePair::new_i16(297, 0),    // mleader_plane_normal_reversed
+                // CodePair::new_f64(10, 0.0),   // vertex.x
+                // CodePair::new_f64(20, 0.0),   // vertex.y
+                // CodePair::new_f64(30, 0.0),   // vertex.z
+                CodePair::new_i32(90, 0), // break_point_index
+                // LEADER Section
+                CodePair::new_str(302, "LEADER{"),
+                // MLeader Leader Node Group Codes
+                CodePair::new_i16(290, 1), // has_set_last_leader_line_point
+                CodePair::new_i16(291, 1), // has_set_dogleg_vector
+                CodePair::new_f64(10, 2.5), // last_leader_line_point.x
+                CodePair::new_f64(20, 1.0), // last_leader_line_point.y
+                CodePair::new_f64(30, 0.0), // last_leader_line_point.z
+                CodePair::new_f64(11, 1.0), // dogleg_vector.x
+                CodePair::new_f64(21, 0.0), // dogleg_vector.y
+                CodePair::new_f64(31, 0.0), // dogleg_vector.z
+                // CodePair::new_f64(12, 0.0), // break_start_point.x
+                // CodePair::new_f64(22, 0.0), // break_start_point.y
+                // CodePair::new_f64(32, 0.0), // break_start_point.z
+                // CodePair::new_f64(13, 0.0), // break_end_point.x
+                // CodePair::new_f64(23, 0.0), // break_end_point.y
+                // CodePair::new_f64(33, 0.0), // break_end_point.z
+                CodePair::new_i32(90, 0),   // leader_branch_index
+                CodePair::new_f64(40, 0.3), // dogleg_length_leader
+                // LEADER_LINE Section
+                CodePair::new_str(304, "LEADER_LINE{"),
+                // MLeader Leader Line Group Codes (vertices)
+                CodePair::new_f64(10, 0.0), // vertex 0 x
+                CodePair::new_f64(20, 0.0), // vertex 0 y
+                CodePair::new_f64(30, 0.0), // vertex 0 z
+                // CodePair::new_i32(90, 0),                // break_point_index_line
+                // CodePair::new_f64(11, 0.0),              // break_start_point_line.x
+                // CodePair::new_f64(21, 0.0),              // break_start_point_line.y
+                // CodePair::new_f64(31, 0.0),              // break_start_point_line.z
+                // CodePair::new_f64(12, 0.0),              // break_end_point_line.x
+                // CodePair::new_f64(22, 0.0),              // break_end_point_line.y
+                // CodePair::new_f64(32, 0.0),              // break_end_point_line.z
+                CodePair::new_i32(91, 0), // leader_line_index
+                // Close sections
+                CodePair::new_str(305, "}"), // LEADER_LINE_END
+                CodePair::new_str(303, "}"), // LEADER_END
+                CodePair::new_str(301, "}"), // CONTEXT_DATA_END
+            ],
+        );
+
+        // Output file
+        let output_folder = "test-output";
+        if !std::path::Path::new(output_folder).exists() {
+            std::fs::create_dir(output_folder).unwrap();
+        }
+        let output_path = format!("{}/mleader_basic.dxf", output_folder);
+        drawing.save_file(&output_path).unwrap();
+        println!("MLeader written to {}", output_path);
+    }
+
+    #[test]
     fn read_entity_with_flags() {
         let ent = read_entity("IMAGE", vec![CodePair::new_i16(70, 5)]);
         match ent.specific {
@@ -2093,7 +3630,7 @@ mod tests {
             &drawing,
             vec![
                 CodePair::new_str(0, "LINE"),
-                CodePair::new_str(5, "10"),
+                CodePair::new_str(5, "1E"),
                 CodePair::new_str(330, "A2"),
             ],
         );
@@ -2436,7 +3973,7 @@ mod tests {
             &drawing,
             vec![
                 CodePair::new_str(0, "POLYLINE"), // polyline
-                CodePair::new_str(5, "13"),
+                CodePair::new_str(5, "21"),
                 CodePair::new_str(100, "AcDbEntity"),
                 CodePair::new_str(8, "0"),
                 CodePair::new_str(100, "AcDb2dPolyline"),
@@ -2445,7 +3982,7 @@ mod tests {
                 CodePair::new_f64(20, 0.0),
                 CodePair::new_f64(30, 0.0),
                 CodePair::new_str(0, "VERTEX"), // vertex 1
-                CodePair::new_str(5, "10"),
+                CodePair::new_str(5, "1E"),
                 CodePair::new_str(100, "AcDbEntity"),
                 CodePair::new_str(8, "0"),
                 CodePair::new_str(100, "AcDbVertex"),
@@ -2456,7 +3993,7 @@ mod tests {
                 CodePair::new_i16(70, 0),
                 CodePair::new_f64(50, 0.0),
                 CodePair::new_str(0, "VERTEX"), // vertex 2
-                CodePair::new_str(5, "11"),
+                CodePair::new_str(5, "1F"),
                 CodePair::new_str(100, "AcDbEntity"),
                 CodePair::new_str(8, "0"),
                 CodePair::new_str(100, "AcDbVertex"),
@@ -2467,7 +4004,7 @@ mod tests {
                 CodePair::new_i16(70, 0),
                 CodePair::new_f64(50, 0.0),
                 CodePair::new_str(0, "VERTEX"), // vertex 3
-                CodePair::new_str(5, "12"),
+                CodePair::new_str(5, "20"),
                 CodePair::new_str(100, "AcDbEntity"),
                 CodePair::new_str(8, "0"),
                 CodePair::new_str(100, "AcDbVertex"),
@@ -2503,7 +4040,7 @@ mod tests {
             &drawing,
             vec![
                 CodePair::new_str(0, "POLYLINE"), // polyline
-                CodePair::new_str(5, "11"),
+                CodePair::new_str(5, "1F"),
                 CodePair::new_str(100, "AcDbEntity"),
                 CodePair::new_str(8, "0"),
                 CodePair::new_str(100, "AcDb3dPolyline"), // 3d = true
@@ -2513,7 +4050,7 @@ mod tests {
                 CodePair::new_f64(30, 0.0),
                 CodePair::new_i16(70, 8),       // 3d = true
                 CodePair::new_str(0, "VERTEX"), // vertex 1
-                CodePair::new_str(5, "10"),
+                CodePair::new_str(5, "1E"),
                 CodePair::new_str(100, "AcDbEntity"),
                 CodePair::new_str(8, "0"),
                 CodePair::new_str(100, "AcDbVertex"),
@@ -3290,7 +4827,7 @@ mod tests {
         file.add_entity(Entity::new(EntityType::MLine(mline)));
         file.normalize();
         let objects = file.objects().collect::<Vec<_>>();
-        assert_eq!(1, objects.len());
+        assert_eq!(2, objects.len());
         match objects[0].specific {
             ObjectType::MLineStyle(ref ml) => assert_eq!("style name", ml.style_name),
             _ => panic!("expected an mline style"),
@@ -3315,5 +4852,415 @@ mod tests {
         assert_eq!("ANNOTATIVE", dim_styles[0].name);
         assert_eq!("STANDARD", dim_styles[1].name);
         assert_eq!("style name", dim_styles[2].name);
+    }
+
+    #[test]
+    fn test_read_hatch_pattern_definition() {
+        let mut hatch = Hatch::default();
+        hatch.hatch_pattern_double = true;
+        hatch.pixel_size = 99.0;
+        hatch.associative = true; // Required for pixel_size to be written
+
+        let line1 = PatternDefinitionLine::new_with_dashes(
+            1.0,
+            Point::new(2.0, 3.0, 0.0),
+            Vector::new(4.0, 5.0, 0.0),
+            vec![6.0, 7.0],
+        );
+
+        let line2 = PatternDefinitionLine::new_with_dashes(
+            8.0,
+            Point::new(9.0, 10.0, 0.0),
+            Vector::new(11.0, 12.0, 0.0),
+            vec![13.0, 14.0],
+        );
+
+        hatch.pattern_definition_lines = vec![line1, line2];
+
+        let mut drawing = Drawing::new();
+        drawing.header.version = AcadVersion::R14; // HATCH entities require R14 or later
+        drawing.add_entity(Entity::new(EntityType::Hatch(hatch)));
+
+        assert_contains_pairs(
+            &drawing,
+            vec![
+                CodePair::new_i16(77, 1), // IsPatternDoubled
+                CodePair::new_i16(78, 2), // line count
+                // line 1
+                CodePair::new_f64(53, 1.0), // angle
+                CodePair::new_f64(43, 2.0), // base point X
+                CodePair::new_f64(44, 3.0), // base point Y
+                CodePair::new_f64(45, 4.0), // offset X
+                CodePair::new_f64(46, 5.0), // offset Y
+                CodePair::new_i16(79, 2),   // dash count
+                CodePair::new_f64(49, 6.0), // dash length 1
+                CodePair::new_f64(49, 7.0), // dash length 2
+                // line 2
+                CodePair::new_f64(53, 8.0),  // angle
+                CodePair::new_f64(43, 9.0),  // base point X
+                CodePair::new_f64(44, 10.0), // base point Y
+                CodePair::new_f64(45, 11.0), // offset X
+                CodePair::new_f64(46, 12.0), // offset Y
+                CodePair::new_i16(79, 2),    // dash count
+                CodePair::new_f64(49, 13.0), // dash length 1
+                CodePair::new_f64(49, 14.0), // dash length 2
+                // pixel size after pattern definition lines
+                CodePair::new_f64(47, 99.0), // pixel size
+            ],
+        );
+    }
+
+    #[test]
+    fn test_read_hatch_with_no_boundary_no_patern() {
+        let mut hatch = Hatch::default();
+        hatch.boundary_paths = vec![];
+        hatch.pattern_definition_lines = vec![];
+        hatch.pixel_size = 42.0;
+        hatch.associative = true;
+
+        let mut drawing = Drawing::new();
+        drawing.header.version = AcadVersion::R14; // HATCH entities require R14 or later
+        drawing.add_entity(Entity::new(EntityType::Hatch(hatch)));
+
+        assert_contains_pairs(
+            &drawing,
+            vec![
+                CodePair::new_i32(91, 0),    // boundary path count
+                CodePair::new_i16(75, 0),    // hatch style (OddParity = 0)
+                CodePair::new_i16(76, 1),    // hatch pattern type (Predefined = 1)
+                CodePair::new_f64(47, 42.0), // pixel size
+            ],
+        )
+    }
+
+    #[test]
+    fn read_hatch_pattern_definition_test() {
+        let ent = read_hatch_entity(vec![
+            CodePair::new_i16(77, 1), // is pattern doubled
+            CodePair::new_i16(78, 2), // pattern definition line count
+            // Line 1
+            CodePair::new_f64(53, 1.0), // angle
+            CodePair::new_f64(43, 2.0), // base point X
+            CodePair::new_f64(44, 3.0), // base point Y
+            CodePair::new_f64(45, 4.0), // offset X
+            CodePair::new_f64(46, 5.0), // offset Y
+            CodePair::new_i16(79, 2),   // dash count
+            CodePair::new_f64(49, 6.0), // dash length 1
+            CodePair::new_f64(49, 7.0), // dash length 2
+            // Line 2
+            CodePair::new_f64(53, 8.0),  // angle
+            CodePair::new_f64(43, 9.0),  // base point X
+            CodePair::new_f64(44, 10.0), // base point Y
+            CodePair::new_f64(45, 11.0), // offset X
+            CodePair::new_f64(46, 12.0), // offset Y
+            CodePair::new_i16(79, 2),    // dash count
+            CodePair::new_f64(49, 13.0), // dash length 1
+            CodePair::new_f64(49, 14.0), // dash length 2
+            CodePair::new_f64(47, 99.0), // pixel size
+        ]);
+
+        match ent.specific {
+            EntityType::Hatch(ref hatch) => {
+                assert!(hatch.hatch_pattern_double); // specified before pattern definition lines
+                assert_eq!(99.0, hatch.pixel_size); // specified after pattern definition lines
+
+                assert_eq!(2, hatch.pattern_definition_lines.len());
+
+                let line1 = &hatch.pattern_definition_lines[0];
+                assert_eq!(1.0, line1.angle);
+                assert_eq!(2.0, line1.base_point.x);
+                assert_eq!(3.0, line1.base_point.y);
+                assert_eq!(4.0, line1.offset.x);
+                assert_eq!(5.0, line1.offset.y);
+                assert_eq!(vec![6.0, 7.0], line1.dash_lengths);
+
+                let line2 = &hatch.pattern_definition_lines[1];
+                assert_eq!(8.0, line2.angle);
+                assert_eq!(9.0, line2.base_point.x);
+                assert_eq!(10.0, line2.base_point.y);
+                assert_eq!(11.0, line2.offset.x);
+                assert_eq!(12.0, line2.offset.y);
+                assert_eq!(vec![13.0, 14.0], line2.dash_lengths);
+            }
+            _ => panic!("expected a hatch"),
+        }
+    }
+
+    #[test]
+    fn test_hatch_solid_building_boundary() {
+        // Arrange
+        let entity = read_entity(
+            "HATCH",
+            vec![
+                CodePair::new_str(100, "AcDbEntity"),
+                CodePair::new_str(8, "Bygning"),
+                CodePair::new_str(100, "AcDbHatch"),
+                CodePair::new_f64(10, 0.0),
+                CodePair::new_f64(20, 0.0),
+                CodePair::new_f64(30, 25.94),
+                CodePair::new_f64(210, 0.0),
+                CodePair::new_f64(220, 0.0),
+                CodePair::new_f64(230, 1.0),
+                CodePair::new_str(2, "SOLID"),
+                CodePair::new_i16(70, 1),
+                CodePair::new_i16(71, 0),
+                CodePair::new_i32(91, 1),
+                CodePair::new_i32(92, 2),
+                CodePair::new_i16(72, 0),
+                CodePair::new_i16(73, 1),
+                CodePair::new_i32(93, 11),
+                CodePair::new_f64(10, 676332.8),
+                CodePair::new_f64(20, 6126363.24),
+                CodePair::new_f64(10, 676338.66),
+                CodePair::new_f64(20, 6126359.88),
+                CodePair::new_f64(10, 676337.11),
+                CodePair::new_f64(20, 6126357.17),
+                CodePair::new_f64(10, 676344.71),
+                CodePair::new_f64(20, 6126352.82),
+                CodePair::new_f64(10, 676346.23),
+                CodePair::new_f64(20, 6126355.48),
+                CodePair::new_f64(10, 676346.69),
+                CodePair::new_f64(20, 6126355.22),
+                CodePair::new_f64(10, 676352.05),
+                CodePair::new_f64(20, 6126364.58),
+                CodePair::new_f64(10, 676337.41),
+                CodePair::new_f64(20, 6126372.97),
+                CodePair::new_f64(10, 676332.72),
+                CodePair::new_f64(20, 6126364.79),
+                CodePair::new_f64(10, 676332.07),
+                CodePair::new_f64(20, 6126363.66),
+                CodePair::new_f64(10, 676332.8),
+                CodePair::new_f64(20, 6126363.24),
+                CodePair::new_i32(97, 0),
+                CodePair::new_i16(75, 0),
+                CodePair::new_i16(76, 1),
+                CodePair::new_i32(98, 0),
+            ],
+        );
+
+        // Assert
+        match entity.specific {
+            EntityType::Hatch(ref hatch) => {
+                assert_eq!(hatch.elevation.z, 25.94);
+                assert_eq!(hatch.boundary_paths.len(), 1);
+
+                let path = &hatch.boundary_paths[0];
+                assert_eq!(path.edges.len(), 11);
+
+                // Verify closed loop
+            }
+            _ => panic!("expected a Hatch"),
+        }
+
+        assert_eq!(entity.common.layer, "Bygning");
+    }
+
+    #[test]
+    fn write_hatch_pattern_definition_test() {
+        let mut hatch = Hatch::default();
+        hatch.hatch_pattern_double = true; // written before pattern definition lines
+        hatch.pixel_size = 99.0; // written after pattern definition lines
+        hatch.associative = true; // Required for pixel_size to be written
+
+        let line1 = PatternDefinitionLine::new_with_dashes(
+            1.0,
+            Point::new(2.0, 3.0, 0.0),
+            Vector::new(4.0, 5.0, 0.0),
+            vec![6.0, 7.0],
+        );
+
+        let line2 = PatternDefinitionLine::new_with_dashes(
+            8.0,
+            Point::new(9.0, 10.0, 0.0),
+            Vector::new(11.0, 12.0, 0.0),
+            vec![13.0, 14.0],
+        );
+
+        hatch.pattern_definition_lines = vec![line1, line2];
+
+        let mut drawing = Drawing::new();
+        drawing.header.version = AcadVersion::R14;
+        drawing.add_entity(Entity::new(EntityType::Hatch(hatch)));
+
+        assert_contains_pairs(
+            &drawing,
+            vec![
+                CodePair::new_i16(77, 1), // is pattern doubled
+                CodePair::new_i16(78, 2), // pattern definition line count
+                // Line 1
+                CodePair::new_f64(53, 1.0), // angle
+                CodePair::new_f64(43, 2.0), // base point X
+                CodePair::new_f64(44, 3.0), // base point Y
+                CodePair::new_f64(45, 4.0), // offset X
+                CodePair::new_f64(46, 5.0), // offset Y
+                CodePair::new_i16(79, 2),   // dash count
+                CodePair::new_f64(49, 6.0), // dash length 1
+                CodePair::new_f64(49, 7.0), // dash length 2
+                // Line 2
+                CodePair::new_f64(53, 8.0),  // angle
+                CodePair::new_f64(43, 9.0),  // base point X
+                CodePair::new_f64(44, 10.0), // base point Y
+                CodePair::new_f64(45, 11.0), // offset X
+                CodePair::new_f64(46, 12.0), // offset Y
+                CodePair::new_i16(79, 2),    // dash count
+                CodePair::new_f64(49, 13.0), // dash length 1
+                CodePair::new_f64(49, 14.0), // dash length 2
+                // pixel size after pattern definition lines
+                CodePair::new_f64(47, 99.0), // pixel size
+            ],
+        );
+    }
+
+    #[test]
+    fn write_hatch_seed_points_test() {
+        let mut hatch = Hatch::default();
+        hatch.pixel_size = 99.0; // written before seed points
+        hatch.associative = true; // Required for pixel_size to be written
+        hatch.seed_points = vec![Point::new(1.0, 2.0, 0.0), Point::new(3.0, 4.0, 0.0)];
+
+        let mut drawing = Drawing::new();
+        drawing.header.version = AcadVersion::R14;
+        drawing.add_entity(Entity::new(EntityType::Hatch(hatch)));
+
+        assert_contains_pairs(
+            &drawing,
+            vec![
+                CodePair::new_f64(47, 99.0), // pixel size
+                CodePair::new_i32(98, 2),    // seed point count
+                CodePair::new_f64(10, 1.0),  // seed point 1 X
+                CodePair::new_f64(20, 2.0),  // seed point 1 Y
+                CodePair::new_f64(10, 3.0),  // seed point 2 X
+                CodePair::new_f64(20, 4.0),  // seed point 2 Y
+            ],
+        );
+    }
+
+    #[test]
+    fn test_hatch_extrusion_direction_serialization() {
+        let mut hatch = Hatch::default();
+        hatch.extrusion_direction = Vector::new(0.707, 0.707, 0.0); // 45-degree normal in XY plane
+        hatch.associative = true; // Required for some fields to be written
+
+        let mut drawing = Drawing::new();
+        drawing.header.version = AcadVersion::R14;
+        drawing.add_entity(Entity::new(EntityType::Hatch(hatch)));
+
+        // Should contain the extrusion direction codes since it's not default Z-axis
+        assert_contains_pairs(
+            &drawing,
+            vec![
+                CodePair::new_f64(210, 0.707), // extrusion direction X
+                CodePair::new_f64(220, 0.707), // extrusion direction Y
+                CodePair::new_f64(230, 0.0),   // extrusion direction Z
+            ],
+        );
+    }
+
+    #[test]
+    fn test_hatch_default_extrusion_direction_serialized() {
+        let hatch = Hatch::default(); // Uses default Z-axis extrusion
+
+        let mut drawing = Drawing::new();
+        drawing.header.version = AcadVersion::R14;
+        drawing.add_entity(Entity::new(EntityType::Hatch(hatch)));
+
+        // Default extrusion direction (0, 0, 1) should not be written to save space
+        assert_contains_pairs(
+            &drawing,
+            vec![
+                CodePair::new_f64(210, 0.0), // extrusion direction X
+                CodePair::new_f64(220, 0.0), // extrusion direction Y
+                CodePair::new_f64(230, 1.0), // extrusion direction Z
+            ],
+        );
+    }
+
+    #[test]
+    fn test_hatch_x_axis_normal_serialization() {
+        let mut hatch = Hatch::new_rectangle_solid_fill(0.0, 0.0, 10.0, 10.0);
+        hatch.extrusion_direction = Vector::new(1.0, 0.0, 0.0); // X-axis normal
+
+        let mut drawing = Drawing::new();
+        drawing.header.version = AcadVersion::R14;
+        drawing.add_entity(Entity::new(EntityType::Hatch(hatch)));
+
+        assert_contains_pairs(
+            &drawing,
+            vec![
+                CodePair::new_f64(210, 1.0), // extrusion direction X
+                CodePair::new_f64(220, 0.0), // extrusion direction Y
+                CodePair::new_f64(230, 0.0), // extrusion direction Z
+            ],
+        );
+    }
+
+    #[test]
+    fn test_hatch_normal_vector_convenience_methods() {
+        let mut hatch = Hatch::new_rectangle_solid_fill(0.0, 0.0, 10.0, 10.0);
+
+        // Test default normal vector
+        assert_eq!(hatch.normal_vector(), &Vector::z_axis());
+
+        // Test setting custom normal vector
+        let custom_normal = Vector::new(0.0, 1.0, 0.0);
+        hatch.set_normal_vector(custom_normal.clone());
+
+        assert_eq!(hatch.normal_vector(), &custom_normal);
+        assert_eq!(hatch.extrusion_direction, custom_normal);
+    }
+
+    #[test]
+    fn test_hatch_normal_vector_serialization_with_convenience_methods() {
+        let mut hatch = Hatch::new_rectangle_solid_fill(0.0, 0.0, 10.0, 10.0);
+
+        // Use convenience method to set normal vector
+        hatch.set_normal_vector(Vector::new(0.5, 0.5, 0.707));
+
+        let mut drawing = Drawing::new();
+        drawing.header.version = AcadVersion::R14;
+        drawing.add_entity(Entity::new(EntityType::Hatch(hatch)));
+
+        // Should contain the extrusion direction codes
+        assert_contains_pairs(
+            &drawing,
+            vec![
+                CodePair::new_f64(210, 0.5),   // extrusion direction X
+                CodePair::new_f64(220, 0.5),   // extrusion direction Y
+                CodePair::new_f64(230, 0.707), // extrusion direction Z
+            ],
+        );
+    }
+
+    #[test]
+    fn test_hatch_edges() {
+        let mut hatch = Hatch::default();
+
+        let path_points = vec![Point {
+            x: 1.0,
+            y: 2.1,
+            z: 0.0,
+        }];
+        hatch.set_path(path_points);
+
+        let mut drawing = Drawing::new();
+        drawing.header.version = AcadVersion::R2010;
+        drawing.add_entity(Entity::new(EntityType::Hatch(hatch)));
+
+        assert_contains_pairs(
+            &drawing,
+            vec![
+                CodePair::new_i32(97, 0), // Number of edges in the loop
+                CodePair::new_i16(75, 0), // Edge type
+                CodePair::new_i16(76, 1), // Has bulge data flag
+                CodePair::new_i32(98, 0), // Number of seed points
+            ],
+        );
+
+        assert_not_contains_pairs(
+            &drawing,
+            vec![
+                CodePair::new_i32(78, 0), // Number of pattern definition lines. Must not be present in this test case otherwise hatch might not be loaded depending the loader
+            ],
+        );
     }
 }
